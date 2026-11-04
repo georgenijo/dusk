@@ -56,6 +56,24 @@ try {
   assert.equal((await diagnostic()).engine.writes,0); assert.equal(requests.length,before);
   pass('Public delayed native app also makes zero model requests');
 
+  for (const inline of [false,true]) {
+    const origin = `http://${inline ? 'inline-' : ''}wrapper.localhost:8767/`;
+    const wrapper = inline
+      ? '<div class="shell" style="background:#202124;color:#e8eaed"><h1>Native wrapper</h1></div>'
+      : '<div class="shell night"><h1>Native wrapper</h1></div>';
+    await page.route(origin,route=>route.fulfill({contentType:'text/html',body:`<!doctype html><style>html,body{margin:0}.shell{min-height:100vh;background:white;color:#222}.shell.night{background:#202124;color:#e8eaed}</style><body>${wrapper}</body>`}));
+    await page.goto(origin);
+    await waitMode('already-dark');
+    assert.equal((await diagnostic()).engine.writes,0);
+    await page.locator('.shell').evaluate((el,inline)=>{
+      if (inline) { el.style.background='#fff'; el.style.color='#222'; }
+      else el.classList.remove('night');
+    },inline);
+    await waitMode('themed');
+    assert.ok((await diagnostic()).engine.writes>0);
+    pass(`Ordinary wrapper ${inline ? 'inline style' : 'class'} toggle resumes Dusk when native dark becomes light`);
+  }
+
   // A marker without a rendered dark palette must not make a light site skip.
   await page.route('http://marker.localhost:8767/**',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><html dark><style>body{background:white;color:#222;min-height:100vh}</style><body><h1>Still light</h1></body></html>'}));
   await page.goto('http://marker.localhost:8767/');

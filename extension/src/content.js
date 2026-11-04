@@ -913,7 +913,10 @@
       let activated = false;
       serialize(async () => {
         if (enabled) await yieldToNative(forced);
-        else if (!withoutDusk(() => pageLooksDark())) { await activateTheme(); activated = enabled; }
+        else {
+          nativeLastCheck = performance.now();
+          if (!withoutDusk(() => pageLooksDark())) { await activateTheme(); activated = enabled; }
+        }
       }).then(() => { if (activated) return runAdaptation(); }).catch((err) => log('native:error', { error: String(err.message || err) }));
     }, Math.max(150, 500 - (performance.now() - nativeLastCheck)));
   }
@@ -929,6 +932,9 @@
           const root = el === document.documentElement || el === document.body;
           if (root || !['class', 'style'].includes(record.attributeName)) { relevant = true; force = true; }
           else if (el.matches('main,[role=main],#app,#root,ytd-app')) { relevant = true; force = true; }
+          // Native sites have no paint observer. Their theme-bearing wrapper
+          // can be any element, so coalesce its class/style changes too.
+          else if (!enabled) relevant = true;
         } else {
           const nodes = [...record.addedNodes, ...record.removedNodes];
           if (nodes.length && nodes.every((node) => node.nodeType === 1 && node.id?.startsWith('dusk-'))) continue;
