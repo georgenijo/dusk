@@ -752,6 +752,14 @@
       [...motionClassRules.get(name)].every((rule) => [...rule.style].every((prop) => MOTION_ONLY.has(prop))));
   }
   function handleMutations(records) {
+    // Own paint records cannot change author CSS. Drop them before checking
+    // stylesheet structure so every batch doesn't rescan the rule index.
+    records = records.filter((record) => {
+      if (record.target.id?.startsWith('dusk-')) return false;
+      if (record.type === 'attributes' && record.attributeName === 'style' && record.target.getAttribute('style') === ownStyle.get(record.target)) return false;
+      if (record.type === 'childList' && [...record.addedNodes, ...record.removedNodes].every((node) => node.nodeType === 1 && node.id?.startsWith('dusk-'))) return false;
+      return true;
+    });
     if (records.length && stylesheetsChanged()) { indexPseudos(); queue(document.documentElement); }
     for (const r of records) {
       if (r.type === 'childList') {
