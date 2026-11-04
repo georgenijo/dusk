@@ -1,0 +1,13 @@
+node_modules/
+test/out/
+test/debug/out/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+playwright-report/
+test-results/
+test/debug/*.png

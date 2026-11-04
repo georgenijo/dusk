@@ -1,0 +1,7 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Feed</title>
+<style>body{background:#fff;color:#111;font:16px system-ui;padding:30px}.item{background:#f7f7f9;border:1px solid #ddd;padding:12px;margin:8px 0}.item.hot{background:#ffe4e6}</style>
+</head><body><h1>Live feed</h1><div id="feed"></div>
+<script>
+let n=0;const feed=document.getElementById('feed');
+const t=setInterval(()=>{const d=document.createElement('div');d.className='item';d.id='item'+n;d.textContent='Update #'+(n++);feed.appendChild(d);if(n===3){document.getElementById('item0').classList.add('hot')}if(n>=5)clearInterval(t)},300);
+</script></body></html>

@@ -1,0 +1,34 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Field Notes</title>
+<style>
+body{margin:0;background:#fff;color:#1f2328;font:17px/1.6 Georgia,serif}
+header{display:flex;align-items:center;gap:16px;padding:14px 32px;border-bottom:1px solid #e3e3e3;background:#fafafa}
+nav a{color:#555;margin-right:16px;text-decoration:none;font:14px system-ui}
+main{max-width:720px;margin:32px auto;padding:0 20px}
+h1{font-size:34px;line-height:1.2;color:#111}
+a{color:#0b57d0}
+.meta{color:#6b6b6b;font:13px system-ui}
+pre{background:#f5f6f8;border:1px solid #e1e4e8;padding:14px;border-radius:6px;font:14px ui-monospace,monospace;color:#24292f}
+blockquote{border-left:4px solid #d0d7de;margin:0;padding:4px 16px;color:#57606a}
+table{border-collapse:collapse;width:100%;font:15px system-ui}
+td,th{border:1px solid #d0d7de;padding:8px}
+th{background:#f6f8fa}
+.note{background:#fff8c5;border:1px solid #d4a72c;padding:12px;border-radius:6px}
+figure img{max-width:100%}
+</style></head><body>
+<header><img id="logo" src="logo.svg" alt="Field Notes" width="160" height="48"><nav><a href="#">Essays</a><a href="#">Archive</a><a href="#">About</a></nav></header>
+<main>
+<h1>Notes on building small, durable software</h1>
+<p class="meta">November 4, 2026 · 8 min read</p>
+<p id="para">SECRET-SENTENCE-7731 Most software dies of neglect rather than complexity. The tools that last tend to be <a href="#">boring on purpose</a>, with fewer moving parts and clear seams.</p>
+<figure><img id="photo" src="photo.svg" alt="Sunset" width="480" height="270"></figure>
+<blockquote>Make it work, make it right, make it fast.</blockquote>
+<pre id="code">function durable(x) {
+  return x ?? fallback();
+}</pre>
+<div class="note" id="note">Heads up: this essay assumes you have shipped something before.</div>
+<h2>Diagram</h2>
+<img id="diagram" src="diagram.png" alt="Flow" width="320" height="160">
+<table><tr><th>Trait</th><th>Effect</th></tr><tr><td>Few deps</td><td>Fewer breakages</td></tr><tr><td>Plain data</td><td>Easy migrations</td></tr></table>
+<p>More text so the page has some length. <a href="#">Another link</a> appears here.</p>
+<form><label>Email <input id="email" placeholder="you@example.com"></label> <button>Subscribe</button></form>
+</main></body></html>

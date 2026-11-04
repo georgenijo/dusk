@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Dusk · Jev settings</title>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body class="options">
+  <h1>Jev</h1>
+  <p class="muted">Dusk sends Jev page structure only: colors, sizes, class names and image pixel statistics. Never text, URLs or pixels. Banking, mail, health, login and password pages are never sent.</p>
+
+  <label class="check"><input type="checkbox" id="jevEnabled"> Use Jev to decide and adapt themes</label>
+
+  <div class="label">Route</div>
+  <div class="seg" id="provider">
+    <button data-p="cpa">CPA gateway</button>
+    <button data-p="vercel">Vercel AI Gateway</button>
+  </div>
+
+  <div id="cpa">
+    <label>CPA base URL <input id="baseUrl" spellcheck="false"></label>
+    <label>CPA client key <input id="apiKey" type="password" spellcheck="false" autocomplete="off"></label>
+  </div>
+  <div id="vercel">
+    <label>Vercel AI Gateway key <input id="vercelKey" type="password" spellcheck="false" autocomplete="off" placeholder="vck_…"></label>
+  </div>
+
+  <label class="check"><input type="checkbox" id="debug"> Debug logging (writes Dusk's decisions to the page console)</label>
+
+  <div class="actions">
+    <button id="save" class="primary">Save</button>
+    <button id="test">Test Jev</button>
+    <span id="out" class="small"></span>
+  </div>
+  <script src="options.js"></script>
+</body>
+</html>
