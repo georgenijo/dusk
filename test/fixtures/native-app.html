@@ -1,0 +1,16 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Native app fixture</title>
+<style>
+html,body{margin:0;font:16px system-ui;color:#222}
+#app{min-height:100vh;background:#fff;color:#222}
+#app.ready{background:#202124;color:#e8eaed}
+#app p{margin:0;padding:8px}
+</style></head><body><main id="app">Loading…</main>
+<script>
+setTimeout(() => {
+  const app = document.querySelector('#app');
+  app.className = 'ready';
+  app.replaceChildren(...Array.from({length:100}, (_, i) => {
+    const row = document.createElement('p'); row.textContent = `Message ${i}`; return row;
+  }));
+}, Number(new URLSearchParams(location.search).get('delay') || 1800));
+</script></body></html>

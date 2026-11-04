@@ -8,7 +8,7 @@ const MAX_QUESTIONS = 64;
 // Two routes to the same model: CPA's /v1/evaluations relay (client key), or
 // Vercel AI Gateway's decision-model endpoint directly (vck_ key).
 const VERCEL_URL = 'https://ai-gateway.vercel.sh/v4/ai/decision-model';
-const DEFAULTS = { provider: 'cpa', baseUrl: 'https://cpa-georgenijo.georgenijo.com/v1', apiKey: '', vercelKey: '', jevEnabled: true };
+const DEFAULTS = { provider: 'vercel', baseUrl: 'https://cpa-georgenijo.georgenijo.com/v1', apiKey: '', vercelKey: '', jevEnabled: true };
 
 async function settings() {
   const { settings: s } = await chrome.storage.local.get('settings');
@@ -18,6 +18,26 @@ async function settings() {
 async function recordStatus(patch) {
   const { jevStatus = {} } = await chrome.storage.local.get('jevStatus');
   await chrome.storage.local.set({ jevStatus: { ...jevStatus, ...patch, at: Date.now() } });
+}
+
+async function configurationId(cfg) {
+  const key = cfg.provider === 'vercel' ? cfg.vercelKey : cfg.apiKey;
+  const route = cfg.provider === 'vercel' ? VERCEL_URL : cfg.baseUrl.replace(/\/+$/, '') + '/evaluations';
+  const bytes = new TextEncoder().encode(JSON.stringify([cfg.provider, route, key]));
+  return [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function connectionStatus() {
+  const cfg = await settings();
+  const hasKey = !!(cfg.provider === 'vercel' ? cfg.vercelKey : cfg.apiKey);
+  const { jevStatus = {} } = await chrome.storage.local.get('jevStatus');
+  const matching = hasKey && jevStatus.configurationId === await configurationId(cfg);
+  return {
+    provider: cfg.provider, hasKey, jevEnabled: cfg.jevEnabled,
+    verified: !!(cfg.jevEnabled && matching && jevStatus.ok),
+    lastError: matching ? jevStatus.error || null : null,
+    lastVerifiedAt: matching ? jevStatus.lastVerifiedAt || null : null,
+  };
 }
 
 async function evaluateChunk(cfg, state, questions) {
@@ -78,10 +98,14 @@ function remember(cfg, entry) {
 }
 globalThis.duskDebugLog = debugLog;
 
-async function evaluate(state, questions) {
+async function evaluate(state, questions, sender = {}) {
   const cfg = await settings();
   if (!cfg.jevEnabled) return { ok: false, error: 'disabled' };
   if (!(cfg.provider === 'vercel' ? cfg.vercelKey : cfg.apiKey)) return { ok: false, error: 'no API key (open Dusk options)' };
+  const id = await configurationId(cfg);
+  let host = null;
+  try { if (sender.tab?.url) host = new URL(sender.tab.url).hostname; } catch {}
+  const source = { source: sender.tab ? 'page' : 'settings', host, tabId: sender.tab?.id ?? null };
   const names = Object.keys(questions);
   const chunks = [];
   for (let i = 0; i < names.length; i += MAX_QUESTIONS) {
@@ -92,14 +116,15 @@ async function evaluate(state, questions) {
     const answers = Object.assign({}, ...results.map((r) => r.answers));
     const ms = Math.max(...results.map((r) => r.ms));
     remember(cfg, { state, questions, answers });
-    logCall({ provider: cfg.provider, questions: names.length, chunks: chunks.length, ms });
-    await recordStatus({ ok: true, error: null, lastMs: ms, questions: names.length });
+    logCall({ ...source, provider: cfg.provider, questions: names.length, chunks: chunks.length, ms });
+    await recordStatus({ ok: true, error: null, lastMs: ms, questions: names.length, configurationId: id, lastVerifiedAt: Date.now() });
     return { ok: true, answers, ms };
   } catch (err) {
-    const error = err.name === 'AbortError' ? 'timeout' : String(err.message || err);
+    let error = err.name === 'AbortError' ? 'timeout' : String(err.message || err);
+    for (const key of [cfg.apiKey, cfg.vercelKey]) if (key) error = error.split(key).join('[redacted]');
     remember(cfg, { state, questions, error });
-    logCall({ provider: cfg.provider, questions: names.length, chunks: chunks.length, error });
-    await recordStatus({ ok: false, error });
+    logCall({ ...source, provider: cfg.provider, questions: names.length, chunks: chunks.length, error });
+    await recordStatus({ ok: false, error, configurationId: id });
     return { ok: false, error };
   }
 }
@@ -126,18 +151,13 @@ async function analyzeImage(url) {
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type === 'jev') {
-    evaluate(msg.state, msg.questions).then(reply);
+    evaluate(msg.state, msg.questions, sender).then(reply);
     return true;
   }
-  if (msg.type === 'workerLog') {
-    settings().then((cfg) => reply({
-      provider: cfg.provider,
-      hasKey: !!(cfg.provider === 'vercel' ? cfg.vercelKey : cfg.apiKey),
-      jevEnabled: cfg.jevEnabled,
-      calls: callLog,
-    }));
+  if (msg.type === 'connectionStatus' || msg.type === 'workerLog') {
+    connectionStatus().then((connection) => reply(msg.type === 'workerLog' ? { ...connection, calls: callLog } : connection)).catch(() => reply(null));
     return true;
   }
   if (msg.type === 'analyzeImages') {

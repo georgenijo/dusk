@@ -1,44 +1,62 @@
 <!doctype html>
-<html>
+<html lang="en" class="popup-root">
 <head>
-<meta charset="utf-8">
-<link rel="stylesheet" href="ui.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dusk · This site</title>
+  <link rel="stylesheet" href="ui.css">
 </head>
 <body class="popup">
-  <header>
-    <strong>Dusk</strong>
-    <span id="host" class="muted"></span>
+  <header class="popup-header">
+    <span class="dusk-mark" aria-hidden="true"></span>
+    <h1>Dusk</h1><p id="host" class="muted site-host">This site</p>
   </header>
-
-  <section class="row">
-    <span>Mode</span>
-    <div class="seg" id="modes">
-      <button data-mode="auto">Auto</button>
-      <button data-mode="on">Always</button>
-      <button data-mode="off">Off</button>
-    </div>
-  </section>
-
-  <section id="state" class="card"></section>
-
-  <section>
-    <div class="label">Something look wrong?</div>
-    <div class="grid">
-      <button data-fb="too_bright">Too bright</button>
-      <button data-fb="too_dark">Too dark</button>
-      <button data-fb="hard_to_read">Hard to read</button>
-      <button data-fb="colors_wrong">Colors off</button>
-      <button data-fb="images_wrong">Images off</button>
-      <button id="pick">Fix an element…</button>
-    </div>
-    <div id="result" class="muted small"></div>
-  </section>
-
-  <footer>
-    <button id="reset" class="link">Forget this site</button>
-    <button id="diag" class="link">Copy diagnostics</button>
-    <a href="options.html" target="_blank" class="link">Jev settings</a>
+  <main class="popup-main">
+    <section id="state" class="card theme-card" aria-label="Page theme" aria-live="polite">
+      <h2 id="theme-state">Checking page…</h2>
+      <p id="theme-help" class="help">Looking for the site’s appearance.</p>
+      <button type="button" id="reload" class="wide" hidden>Refresh this tab</button>
+    </section>
+    <section id="appearance" aria-labelledby="mode-label">
+      <h2 id="mode-label" class="sr-only">For this site</h2>
+      <div class="seg" id="modes" role="group" aria-label="Site appearance" aria-describedby="mode-help">
+        <button type="button" data-mode="auto" aria-pressed="true" disabled>Auto</button>
+        <button type="button" data-mode="on" aria-pressed="false" disabled>Always</button>
+        <button type="button" data-mode="off" aria-pressed="false" disabled>Off</button>
+      </div>
+      <p id="mode-help" class="help">Use the site’s dark mode when available.</p>
+    </section>
+    <section class="card connection-card" aria-label="Jev connection">
+      <div class="row"><h2 class="section-label">Jev connection</h2><span id="connection" class="badge">Checking…</span></div>
+      <p id="connection-help" class="help">Checking saved settings.</p>
+      <button type="button" id="setup" class="primary wide" hidden>Set up Jev</button>
+      <div class="page-activity">
+        <div class="row request-row"><span>Page request attempts</span><strong id="attempts">0</strong></div>
+        <p id="request-help" class="help">Attempts on this page, not billed tokens.</p>
+      </div>
+    </section>
+    <details id="feedback" class="feedback">
+      <summary>Adjust this page</summary>
+      <div class="feedback-body">
+        <p id="feedback-help" class="help">Available while Dusk is applying a theme.</p>
+        <div class="grid">
+          <button type="button" data-fb="too_bright" disabled>Too bright</button>
+          <button type="button" data-fb="too_dark" disabled>Too dark</button>
+          <button type="button" data-fb="hard_to_read" disabled>Hard to read</button>
+          <button type="button" data-fb="colors_wrong" disabled>Colors off</button>
+          <button type="button" data-fb="images_wrong" disabled>Images off</button>
+          <button type="button" id="pick" disabled>Fix an element…</button>
+        </div>
+        <button type="button" id="reverify" class="wide" disabled>Recheck with Jev</button>
+      </div>
+    </details>
+  </main>
+  <footer class="popup-footer" aria-label="Dusk actions">
+    <button type="button" id="settings" class="wide action-button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M4 14h12M7 3v6m6 2v6"/></svg><span>Jev settings</span><span class="action-arrow" aria-hidden="true">›</span></button>
+    <button type="button" id="diag" class="wide action-button"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="7" width="9" height="10" rx="2"/><path d="M12 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/></svg><span>Copy diagnostics</span></button>
+    <button type="button" id="reset" class="wide action-button" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 7a6 6 0 1 1 0 6M4 3v4h4"/></svg><span id="reset-label">Reset site preferences</span></button>
   </footer>
-  <script src="popup.js"></script>
+  <p id="result" class="notice" role="status" hidden></p>
+  <script src="popup.js" type="module"></script>
 </body>
 </html>
