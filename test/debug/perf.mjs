@@ -22,10 +22,15 @@ async function measure(ctx, label, sw) {
   await page.waitForTimeout(4000);
   const scrolled = await snap();
   const elements = await page.evaluate(() => document.getElementsByTagName('*').length);
-  let jev = null;
+  let jev = null, diagnostics = null;
   if (sw) {
     const calls = await sw.evaluate((n) => (globalThis.duskDebugLog || []).slice(n), before);
-    jev = { calls: calls.length, questions: calls.reduce((s, c) => s + Object.keys(c.body?.questions || c.questions || {}).length, 0), kb: Math.round(calls.reduce((s, c) => s + JSON.stringify(c.body || c.request || c).length, 0) / 1024) };
+    diagnostics = await sw.evaluate(async (u) => {
+      const [tab] = await chrome.tabs.query({ url: u });
+      const d = await chrome.tabs.sendMessage(tab.id, { type: 'diagnostics' });
+      return { mode: d.status.mode, jev: d.status.jev, engine: d.engine, walk: d.events.find((e) => e.kind === 'walk')?.ms };
+    }, page.url());
+    jev = { calls: calls.length, questions: calls.reduce((s, c) => s + Object.keys(c.body?.questions || c.questions || {}).length, 0), kb: Math.round(calls.reduce((s, c) => s + JSON.stringify({ state: c.state, questions: c.questions }).length, 0) / 1024) };
   }
   await page.close();
   const ms = (o, k) => Math.round(o[k] * 1000);
@@ -33,7 +38,7 @@ async function measure(ctx, label, sw) {
     label, elements,
     loadCpuMs: ms(loaded, 'TaskDuration'), loadScriptMs: ms(loaded, 'ScriptDuration'), loadStyleLayoutMs: ms(loaded, 'RecalcStyleDuration') + ms(loaded, 'LayoutDuration'),
     scrollCpuMs: ms(scrolled, 'TaskDuration') - ms(loaded, 'TaskDuration'), scrollScriptMs: ms(scrolled, 'ScriptDuration') - ms(loaded, 'ScriptDuration'),
-    heapMB: +(scrolled.JSHeapUsedSize / 1048576).toFixed(1), jev,
+    heapMB: +(scrolled.JSHeapUsedSize / 1048576).toFixed(1), jev, diagnostics,
   };
 }
 

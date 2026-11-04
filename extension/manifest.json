@@ -1,19 +1,38 @@
 {
   "manifest_version": 3,
-  "name": "Dusk — adaptive dark mode",
-  "version": "0.2.0",
+  "name": "Dusk \u2014 adaptive dark mode",
+  "version": "0.3.0",
   "description": "Builds a dark theme for sites that don't have one, then refines it per site.",
-  "permissions": ["storage", "activeTab", "scripting", "clipboardWrite"],
-  "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "src/background.js", "type": "module" },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["src/color.js", "src/pixels.js", "src/content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/color.js",
+        "src/pixels.js",
+        "src/content.js"
+      ],
       "run_at": "document_start",
       "all_frames": false
     }
   ],
-  "action": { "default_popup": "ui/popup.html", "default_title": "Dusk" },
+  "action": {
+    "default_popup": "ui/popup.html",
+    "default_title": "Dusk"
+  },
   "options_page": "ui/options.html"
 }

@@ -26,13 +26,19 @@
     warm: { H: 60, C: 0.014 },
   };
   const DEPTHS = [0.13, 0.17, 0.215];
-  const DEFAULT_THEME = { surfaceL: 0.17, tone: 'neutral', surfaceHue: 265, surfaceChroma: 0.006, textL: 0.92, accent: 'keep', minContrast: 4.5, imageDim: 0.9 };
+  const DEFAULT_THEME = { surfaceL: 0.17, tone: 'neutral', surfaceHue: 265, surfaceChroma: 0.006, textL: 0.92, accent: 'keep', minContrast: 4.5, imageDim: 0.8 };
 
   let profile = null;
   let enabled = false;
   let theme = { ...DEFAULT_THEME };
+  const engine = { snapshots: 0, pseudoReads: 0, renders: 0, reused: 0, writes: 0 };
+  const originals = new WeakMap(); // immutable computed-style snapshots
+  let staged = null;
+  let paintRevision = 0;
+  const painted = new WeakMap();
   const saved = new WeakMap();   // el -> { prop: { orig: [value, priority], ours } }
   const effBg = new WeakMap();   // el -> opaque rgb behind the element after theming
+  const roleSigsOf = new WeakMap(); // all solid/gradient signatures used by an element
   const roleOf = new WeakMap();  // el -> { sig, role, lch, area }
   // Per-element tallies, summed over the live DOM on demand, so re-themed or
   // removed elements are never double counted.
@@ -85,21 +91,30 @@
   let pseudoSeq = 0, pseudoQueued = false;
   function setPseudo(el, pseudo, decls) {
     const id = el.getAttribute('data-dusk-pid') || String(++pseudoSeq);
-    el.setAttribute('data-dusk-pid', id);
-    pseudoRules.set(id + pseudo, `[data-dusk-pid="${id}"]${pseudo}{${decls.map((d) => d + '!important').join(';')}}`);
+    if (el.getAttribute('data-dusk-pid') !== id) el.setAttribute('data-dusk-pid', id);
+    const rule = `[data-dusk-pid="${id}"]${pseudo}{${decls.map((d) => d + '!important').join(';')}}`;
+    if (pseudoRules.get(id + pseudo) === rule) return;
+    pseudoRules.set(id + pseudo, rule);
     if (!pseudoQueued) {
       pseudoQueued = true;
       queueMicrotask(() => {
         pseudoQueued = false;
-        pseudoSheet.textContent = [...pseudoRules.values()].join('\n');
+        syncPseudoSheet();
       });
     }
+  }
+  function syncPseudoSheet() {
+    const text = [...pseudoRules.values()].join('\n');
+    if (pseudoSheet.textContent !== text) pseudoSheet.textContent = text;
   }
   function clearPseudo(el) {
     const id = el.getAttribute('data-dusk-pid');
     if (!id) return;
-    pseudoRules.delete(id + '::before');
-    pseudoRules.delete(id + '::after');
+    const changed = pseudoRules.delete(id + '::before') | pseudoRules.delete(id + '::after');
+    if (changed && !pseudoQueued) {
+      pseudoQueued = true;
+      queueMicrotask(() => { pseudoQueued = false; syncPseudoSheet(); });
+    }
   }
 
   // ---------------------------------------------------------------- storage
@@ -119,11 +134,14 @@
 
   // ---------------------------------------------------------------- style writes
   function setProp(el, prop, value) {
+    if (staged) { staged.set(prop, value); return; }
+    if (el.style.getPropertyValue(prop) === value && el.style.getPropertyPriority(prop) === 'important') return;
     let s = saved.get(el);
     if (!s) saved.set(el, (s = {}));
     if (!s[prop]) s[prop] = { orig: [el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop)] };
     s[prop].ours = value;
     el.style.setProperty(prop, value, 'important');
+    engine.writes++;
     markOwn(el);
   }
 
@@ -222,6 +240,9 @@
 
   function bgRole(el, lch, rect) {
     const sig = signature(el, toRgb(lch));
+    let signatures = roleSigsOf.get(el);
+    if (!signatures) roleSigsOf.set(el, (signatures = new Set()));
+    signatures.add(sig);
     if (lch.C < 0.045) {
       const role = profile.overrides[sig] || 'surface';
       roleOf.set(el, { sig, role, lch, area: 0 });
@@ -233,7 +254,7 @@
     if (!role) {
       const interactive = el.matches(INTERACTIVE);
       role = area >= 0.12 ? 'surface' : interactive || area < 0.03 ? 'accent' : lch.L > 0.82 ? 'surface' : 'accent';
-      if (!pendingRoles.has(sig)) pendingRoles.set(sig, describe(el, lch, rect, area, interactive));
+      if (!pendingRoles.has(sig)) pendingRoles.set(sig, describe(el, lch, rect, area, interactive, role));
     }
     roleOf.set(el, { sig, role, lch, area });
     if (role === 'accent') count(el, 'accents');
@@ -241,8 +262,9 @@
   }
 
   // Structure only: tag, class tokens, geometry, colors, counts. No text.
-  function describe(el, lch, rect, area, interactive) {
+  function describe(el, lch, rect, area, interactive, priorRole) {
     return {
+      priorRole,
       tag: el.tagName.toLowerCase(),
       ariaRole: el.getAttribute('role') || null,
       classes: classTokens(el),
@@ -309,14 +331,16 @@
   }
 
   function applyImage(el, treatment) {
+    if (!staged) painted.delete(el);
     const f = FILTERS[treatment];
     const value = typeof f === 'function' ? f() : f;
     if (value) setProp(el, 'filter', value);
-    else if (saved.get(el)?.filter) {
-      const s = saved.get(el);
-      const [v, p] = s.filter.orig;
-      if (v) el.style.setProperty('filter', v, p); else el.style.removeProperty('filter');
-      delete s.filter;
+    else if (!staged && saved.get(el)?.filter) {
+      const old = saved.get(el).filter;
+      if (el.style.getPropertyValue('filter') === old.ours && el.style.getPropertyPriority('filter') === 'important') {
+        if (old.orig[0]) el.style.setProperty('filter', ...old.orig); else el.style.removeProperty('filter');
+      }
+      delete saved.get(el).filter;
       markOwn(el);
     }
     let t = tally.get(el);
@@ -330,8 +354,8 @@
     const known = profile.overrides['img:' + key] || profile.images[key]?.treatment;
     if (known) return applyImage(el, known);
     let entry = pendingImages.get(key);
-    if (!entry) pendingImages.set(key, (entry = { url, els: [], meta: imageMeta(el, url, rect, kind), px: undefined }));
-    entry.els.push(el);
+    if (!entry) pendingImages.set(key, (entry = { url, els: new Set(), meta: imageMeta(el, url, rect, kind), px: undefined }));
+    entry.els.add(el);
     applyImage(el, priorTreatment(entry.meta, null));
   }
 
@@ -344,33 +368,184 @@
     return toRgb({ L: theme.surfaceL, C: theme.surfaceChroma, H: theme.surfaceHue, a: 1 });
   }
 
-  // A running CSS transition makes getComputedStyle return an in-between
-  // value, often the color we just removed. Cancel transitions while reading
-  // so we see the page's real target colors, then hand them back.
-  function process(el) {
-    if (SKIP.has(el.tagName) || el.id?.startsWith?.('dusk-')) return;
-    unapplyAll(el);
-    tally.delete(el);
-    const cs = getComputedStyle(el);
-    if (cs.display === 'none') return;
-    if (!cs.transitionDuration.split(',').some((d) => parseFloat(d) > 0)) return processStyled(el, cs);
-    const prev = [el.style.getPropertyValue('transition'), el.style.getPropertyPriority('transition')];
-    el.style.setProperty('transition', 'none', 'important');
-    try {
-      processStyled(el, cs);
-    } finally {
-      if (prev[0]) el.style.setProperty('transition', prev[0], prev[1]);
-      else el.style.removeProperty('transition');
+  // All restoration/transition writes precede all computed-style reads.
+  // Rendering below consumes plain snapshots and never triggers layout.
+  const STYLE_PROPS = ['display', 'color', 'background-color', 'background-image', 'mix-blend-mode', 'fill', 'stroke', 'content',
+    ...['top', 'right', 'bottom', 'left'].flatMap((side) => [`border-${side}-width`, `border-${side}-color`])];
+  function snapshot(el, pseudo = null) {
+    if (pseudo) engine.pseudoReads++; else engine.snapshots++;
+    const cs = getComputedStyle(el, pseudo);
+    const values = Object.fromEntries(STYLE_PROPS.map((prop) => [prop, cs.getPropertyValue(prop)]));
+    const data = { ...values, display: cs.display, color: cs.color, content: cs.content,
+      backgroundColor: cs.backgroundColor, backgroundImage: cs.backgroundImage, mixBlendMode: cs.mixBlendMode };
+    return { ...data, getPropertyValue: (prop) => values[prop] || '' };
+  }
+
+  // Cross-origin CSS cannot be inspected. In that case keep the exhaustive
+  // fallback, so optimization never silently drops an inaccessible rule.
+  let pseudoSelectors = { '::before': [], '::after': [] }, pseudoFallback = false;
+  const MOTION_ONLY = new Set(['transform', 'translate', 'rotate', 'scale', 'opacity', 'z-index', 'will-change', 'pointer-events', 'transform-origin']);
+  const relevantClasses = new Set();
+  const motionClassRules = new Map();
+  let indexedSheets = [], indexedRules = [];
+  let classFallback = false, motionStyleSafe = true;
+  const sourceSheets = () => [...new Set([...document.styleSheets, ...document.adoptedStyleSheets])].filter((sheet) => !sheet.ownerNode?.id?.startsWith('dusk-'));
+  function indexPseudos() {
+    pseudoSelectors = { '::before': [], '::after': [] };
+    pseudoFallback = false;
+    relevantClasses.clear();
+    motionClassRules.clear();
+    indexedRules = [];
+    indexedSheets = sourceSheets();
+    classFallback = false;
+    motionStyleSafe = true;
+    const inaccessible = () => { pseudoFallback = true; classFallback = true; motionStyleSafe = false; };
+    const visit = (rules, ancestors = '') => {
+      indexedRules.push({ rules, entries: [...rules].map((rule) => ({ rule, selector: rule.selectorText })) });
+      for (const rule of rules) {
+        if (rule.styleSheet) { try { visit(rule.styleSheet.cssRules); } catch { inaccessible(); } }
+        const selector = ancestors + ' ' + (rule.selectorText || '');
+        if (rule.cssRules) {
+          if (/^@scope/i.test(rule.cssText)) { classFallback = true; motionStyleSafe = false; }
+          visit(rule.cssRules, selector);
+        }
+        if (!rule.selectorText && !(rule.style && ancestors.trim())) continue;
+        if (/\[\s*style\b/i.test(selector)) motionStyleSafe = false;
+        if (/\[\s*class\b/i.test(selector) || selector.includes('\\')) classFallback = true;
+        if (rule.style && [...rule.style].some((prop) => !MOTION_ONLY.has(prop))) {
+          for (const match of selector.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) relevantClasses.add(match[1]);
+        } else if (rule.style) {
+          for (const match of selector.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) {
+            if (!motionClassRules.has(match[1])) motionClassRules.set(match[1], new Set());
+            motionClassRules.get(match[1]).add(rule);
+          }
+        }
+        if (!rule.selectorText) continue;
+        // Split only at top-level commas (e.g. :is(.a,.b)::before).
+        for (const pseudo of ['::before', '::after']) {
+          if (!new RegExp('::?' + pseudo.slice(2) + '\\b').test(rule.selectorText)) continue;
+          let depth = 0, start = 0;
+          const selectors = [];
+          for (let i = 0; i <= rule.selectorText.length; i++) {
+            const c = rule.selectorText[i];
+            if (c === '(' || c === '[') depth++;
+            if (c === ')' || c === ']') depth--;
+            if (i === rule.selectorText.length || (c === ',' && !depth)) { selectors.push(rule.selectorText.slice(start, i)); start = i + 1; }
+          }
+          for (const selector of selectors) {
+            const match = selector.match(new RegExp('::?' + pseudo.slice(2) + '\\b'));
+            if (match) pseudoSelectors[pseudo].push(selector.slice(0, match.index).trim() || '*');
+          }
+        }
+      }
+    };
+    for (const sheet of indexedSheets) {
+      if (sheet.ownerNode?.id?.startsWith('dusk-')) continue;
+      try { visit(sheet.cssRules); } catch { inaccessible(); }
+    }
+  }
+  function stylesheetsChanged() {
+    const sheets = sourceSheets();
+    if (sheets.length !== indexedSheets.length || sheets.some((sheet, i) => sheet !== indexedSheets[i])) return true;
+    return indexedRules.some(({ rules, entries }) => rules.length !== entries.length || entries.some(({ rule, selector }, i) => rules[i] !== rule || rule.selectorText !== selector));
+  }
+  function hasPseudo(el, pseudo) {
+    if (pseudoFallback) return true;
+    return pseudoSelectors[pseudo].some((selector) => { try { return el.matches(selector); } catch { return true; } });
+  }
+
+  function readBatch(elements) {
+    // Inspect all transition declarations before any writes. Most elements
+    // have none and need no temporary inline override at all.
+    const durations = new Map(elements.map((el) => [el, getComputedStyle(el).transitionDuration]));
+    const transitioning = elements.filter((el) => durations.get(el).split(',').some((d) => parseFloat(d) > 0));
+    const transitions = new Map();
+    for (const el of transitioning) {
+      transitions.set(el, [el.style.getPropertyValue('transition'), el.style.getPropertyPriority('transition')]);
+      el.style.setProperty('transition', 'none', 'important');
+      markOwn(el);
+    }
+    for (const el of elements) unapplyAll(el);
+    syncPseudoSheet();
+    preflight.disabled = true;
+    const rows = elements.map((el) => {
+      const cs = snapshot(el);
+      cs.transitionDuration = durations.get(el);
+      const row = { cs, rect: el.getBoundingClientRect(), pseudos: {} };
+      if (!(el instanceof SVGElement) && !MEDIA.has(el.tagName)) {
+        for (const pseudo of ['::before', '::after']) if (hasPseudo(el, pseudo)) row.pseudos[pseudo] = snapshot(el, pseudo);
+      }
+      originals.set(el, row);
+      return [el, row];
+    });
+    preflight.disabled = false;
+    rows.transitions = transitions;
+    return rows;
+  }
+  function suppressCachedTransitions(rows) {
+    const transitions = new Map();
+    for (const [el, row] of rows) if (row.cs.transitionDuration?.split(',').some((d) => parseFloat(d) > 0)) {
+      transitions.set(el, [el.style.getPropertyValue('transition'), el.style.getPropertyPriority('transition')]);
+      el.style.setProperty('transition', 'none', 'important');
+      markOwn(el);
+    }
+    return transitions;
+  }
+  function finishBatch(transitions) {
+    if (!transitions?.size) return;
+    // Resolve the mapped colors with transitions still disabled. Restoring
+    // first would animate from the original light colors we just sampled.
+    getComputedStyle(transitions.keys().next().value).color;
+    for (const [el, [value, priority]] of transitions) {
+      if (value) el.style.setProperty('transition', value, priority); else el.style.removeProperty('transition');
       markOwn(el);
     }
   }
 
-  function processStyled(el, cs) {
+  function render(el, row) {
+    if (row.cs.display === 'none') { effBg.delete(el); tally.delete(el); roleOf.delete(el); roleSigsOf.delete(el); painted.delete(el); return; }
+    const behind = parentBg(el);
+    const key = JSON.stringify([paintRevision, row.cs, row.rect.width, row.rect.height, behind, classTokens(el),
+      el.currentSrc || el.src || el.getAttribute('href'), el.childElementCount, el.textContent?.length]);
+    const previous = painted.get(el);
+    if (previous?.key === key && !Object.keys(row.pseudos).length) {
+      engine.reused++;
+      for (const [prop, value] of previous.props) setProp(el, prop, value);
+      if (saved.has(el)) el.setAttribute(ATTR, '');
+      return;
+    }
+    engine.renders++;
+    tally.delete(el);
+    roleOf.delete(el);
+    roleSigsOf.delete(el);
+    staged = new Map();
+    try { processStyled(el, row.cs, row); }
+    finally {
+      const props = staged;
+      staged = null;
+      // A new decision may stop overriding a property. Restore just that one.
+      const old = saved.get(el);
+      if (old) for (const prop of Object.keys(old)) if (!props.has(prop)) {
+        const value = el.style.getPropertyValue(prop);
+        if (value === old[prop].ours && el.style.getPropertyPriority(prop) === 'important') {
+          const [v, priority] = old[prop].orig;
+          if (v) el.style.setProperty(prop, v, priority); else el.style.removeProperty(prop);
+        }
+        delete old[prop];
+        markOwn(el);
+      }
+      for (const [prop, value] of props) setProp(el, prop, value);
+      painted.set(el, { key, props });
+      if (saved.has(el)) el.setAttribute(ATTR, '');
+    }
+  }
+
+  function processStyled(el, cs, row) {
     count(el, 'elements');
     const behind = parentBg(el);
     let own = behind;
     let rect = null;
-    const getRect = () => (rect ??= el.getBoundingClientRect());
+    const getRect = () => (rect ??= row.rect);
 
     const root = el === document.documentElement || el === document.body;
     // Multiply-style blending (Amazon's product tiles) turns black over a dark
@@ -401,7 +576,7 @@
     // Text: only write where the element sets its own color or contrast needs it.
     const fg = C.parse(cs.color);
     if (fg && (root || el.firstChild)) {
-      const parentColor = el.parentElement ? getComputedStyle(el.parentElement).color : null;
+      const parentColor = el.parentElement ? originals.get(el.parentElement)?.cs.color : null;
       const hasText = [...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim());
       const mapped = ensureContrast(mapText(lchOf(fg)), own, hasText ? theme.minContrast : 3, fg);
       const value = C.format(mapped);
@@ -432,7 +607,7 @@
       }
     }
 
-    if (!(el instanceof SVGElement) && !MEDIA.has(el.tagName)) processPseudo(el, own, getComputedStyle(el).color);
+    if (!(el instanceof SVGElement) && !MEDIA.has(el.tagName)) processPseudo(el, own, cs.color, row.pseudos);
 
     if (el.tagName === 'IMG' || el.tagName === 'image') {
       handleImage(el, el.currentSrc || el.src || el.getAttribute('href'), getRect(), 'img');
@@ -449,10 +624,10 @@
     });
   }
 
-  function processPseudo(el, own, parentColor) {
+  function processPseudo(el, own, parentColor, pseudos) {
     for (const pseudo of ['::before', '::after']) {
-      const ps = getComputedStyle(el, pseudo);
-      if (ps.content === 'none' || ps.content === 'normal') continue;
+      const ps = pseudos[pseudo];
+      if (!ps || ps.content === 'none' || ps.content === 'normal') continue;
       const decls = [];
       const bg = C.parse(ps.backgroundColor);
       if (bg && bg.a > 0.01) decls.push(`background-color:${C.format(toRgb(mapSurface(lchOf(bg))))}`);
@@ -469,30 +644,50 @@
     }
   }
 
-  function walk(rootEl, budgetMs = Infinity) {
-    const start = performance.now();
-    const tw = document.createTreeWalker(rootEl, NodeFilter.SHOW_ELEMENT);
-    const queue = [rootEl];
-    for (let n = tw.nextNode(); n; n = tw.nextNode()) queue.push(n);
-    return new Promise((resolve) => {
-      let i = 0;
-      const step = () => {
-        const t0 = performance.now();
-        while (i < queue.length && (performance.now() - t0 < 12 || performance.now() - start < budgetMs)) {
-          if (queue[i].isConnected) process(queue[i]);
-          i++;
-        }
-        drain();
-        if (i < queue.length) requestAnimationFrame(step); else resolve();
-      };
-      step();
-    });
+  let work = Promise.resolve();
+  function serialize(fn) {
+    const next = work.then(fn);
+    work = next.catch(() => {});
+    return next;
   }
+  const eligible = (el) => el.isConnected && !SKIP.has(el.tagName) && !el.id?.startsWith('dusk-');
+  const nextIdle = () => new Promise((resolve) => {
+    if (document.hidden) { addEventListener('visibilitychange', function visible() { if (!document.hidden) { removeEventListener('visibilitychange', visible); resolve(); } }); }
+    else if (window.requestIdleCallback) requestIdleCallback(resolve, { timeout: 150 });
+    else setTimeout(resolve, 16);
+  });
+  async function walkNow(rootEl, cached = false) {
+    const roots = Array.isArray(rootEl) ? rootEl : [rootEl];
+    const elements = [...new Set(roots.flatMap((root) => [root, ...root.querySelectorAll('*')]))].filter(eligible);
+    // Keep document order within each group, including the visible nodes'
+    // ancestors, so effective backgrounds are ready before their descendants.
+    const visible = new Set();
+    for (const el of elements) {
+      const r = (cached && originals.get(el)?.rect) || el.getBoundingClientRect();
+      if (r.bottom >= 0 && r.top <= innerHeight && r.right >= 0 && r.left <= innerWidth) {
+        for (let p = el; p && !visible.has(p); p = p.parentElement) visible.add(p);
+      }
+    }
+    const ordered = [...elements.filter((el) => visible.has(el)), ...elements.filter((el) => !visible.has(el))];
+    for (let i = 0; i < ordered.length; i += 180) {
+      if (document.hidden) await nextIdle();
+      const batch = ordered.slice(i, i + 180).filter(eligible);
+      const rows = cached ? batch.map((el) => [el, originals.get(el)]).filter(([, row]) => row) : readBatch(batch);
+      const transitions = cached ? suppressCachedTransitions(rows) : rows.transitions;
+      try { for (const [el, row] of rows) render(el, row); } finally { syncPseudoSheet(); finishBatch(transitions); }
+      drain();
+      if (i + 180 < ordered.length) await nextIdle();
+    }
+  }
+  function walk(rootEl) { return serialize(() => walkNow(rootEl)); }
 
-  async function rethemeAll() {
-    for (const el of document.querySelectorAll(`[${ATTR}],[data-dusk-pid]`)) unapplyAll(el);
-    drain();
-    await walk(document.documentElement);
+  async function rethemeAll(roots = null) {
+    paintRevision++;
+    return serialize(async () => {
+      const candidates = roots || [document.documentElement];
+      await walkNow(candidates.filter((root) => root.isConnected), true);
+      drain();
+    });
   }
 
   function unthemeAll() {
@@ -505,10 +700,10 @@
   // ---------------------------------------------------------------- dynamic pages
   let observer = null;
   const dirty = new Set();
-  let flushQueued = false;
+  let flushQueued = false, flushing = false;
   function queue(el) {
     dirty.add(el);
-    if (!flushQueued) {
+    if (!flushQueued && !flushing && !document.hidden) {
       flushQueued = true;
       requestAnimationFrame(flush);
     }
@@ -529,18 +724,53 @@
   async function flush() {
     flushQueued = false;
     if (!enabled) return dirty.clear();
+    if (document.hidden || flushing) return;
+    flushing = true;
     const roots = [...dirty].filter((el) => el.isConnected && ![...dirty].some((o) => o !== el && o.contains(el)));
     dirty.clear();
     const t0 = performance.now();
-    for (const r of roots) await walk(r, 30);
+    try { await serialize(() => walkNow(roots)); } finally { flushing = false; }
     if (roots.length) logMutations(roots.length, performance.now() - t0);
     scheduleJev();
+    if (dirty.size) queue([...dirty][0]);
+  }
+  addEventListener('visibilitychange', () => { if (!document.hidden) { if (dirty.size) queue([...dirty][0]); scheduleJev(); } });
+  const styleProbe = document.createElement('div').style;
+  const previousStyleProbe = document.createElement('div').style;
+  function onlyMotionStyle(record) {
+    if (!motionStyleSafe) return false;
+    styleProbe.cssText = record.target.getAttribute('style') || '';
+    previousStyleProbe.cssText = record.oldValue || '';
+    return [...new Set([...styleProbe, ...previousStyleProbe])].every((prop) =>
+      (styleProbe.getPropertyValue(prop) === previousStyleProbe.getPropertyValue(prop) && styleProbe.getPropertyPriority(prop) === previousStyleProbe.getPropertyPriority(prop)) || MOTION_ONLY.has(prop));
+  }
+  function onlyMotionClass(record) {
+    if (classFallback) return false;
+    const before = new Set((record.oldValue || '').split(/\s+/));
+    const after = new Set((record.target.getAttribute('class') || '').split(/\s+/));
+    const changed = [...before].filter((name) => !after.has(name)).concat([...after].filter((name) => !before.has(name)));
+    return changed.every((name) => !relevantClasses.has(name) && motionClassRules.has(name) &&
+      [...motionClassRules.get(name)].every((rule) => [...rule.style].every((prop) => MOTION_ONLY.has(prop))));
   }
   function handleMutations(records) {
+    // Own paint records cannot change author CSS. Drop them before checking
+    // stylesheet structure so every batch doesn't rescan the rule index.
+    records = records.filter((record) => {
+      if (record.target.id?.startsWith('dusk-')) return false;
+      if (record.type === 'attributes' && record.attributeName === 'style' && record.target.getAttribute('style') === ownStyle.get(record.target)) return false;
+      if (record.type === 'childList' && [...record.addedNodes, ...record.removedNodes].every((node) => node.nodeType === 1 && node.id?.startsWith('dusk-'))) return false;
+      return true;
+    });
+    if (records.length && stylesheetsChanged()) { indexPseudos(); queue(document.documentElement); }
     for (const r of records) {
-      if (r.type === 'childList') r.addedNodes.forEach((n) => n.nodeType === 1 && !n.id?.startsWith?.('dusk-') && queue(n));
+      if (r.type === 'childList') {
+        const stylesheet = r.target.closest?.('style') || [...r.addedNodes].find((n) => n.nodeType === 1 && (n.matches?.('style,link[rel=stylesheet]') || n.querySelector?.('style,link[rel=stylesheet]')));
+        if (stylesheet && !stylesheet.id?.startsWith('dusk-')) { indexPseudos(); queue(document.documentElement); }
+        else r.addedNodes.forEach((n) => n.nodeType === 1 && !n.id?.startsWith?.('dusk-') && queue(n));
+      }
       else if (r.target.nodeType === 1 && !SKIP.has(r.target.tagName)) {
-        if (r.attributeName === 'style' && r.target.getAttribute('style') === ownStyle.get(r.target)) continue;
+        if (r.attributeName === 'style' && (r.target.getAttribute('style') === ownStyle.get(r.target) || onlyMotionStyle(r))) continue;
+        if (r.attributeName === 'class' && onlyMotionClass(r)) continue;
         queue(r.target);
       }
     }
@@ -552,7 +782,8 @@
   }
   function observe() {
     observer = new MutationObserver(handleMutations);
-    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'src', 'srcset'] });
+    document.addEventListener('load', (e) => { if (e.target.matches?.('link[rel=stylesheet]')) { indexPseudos(); queue(document.documentElement); } }, true);
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeOldValue: true, attributeFilter: ['class', 'style', 'src', 'srcset', 'href', 'media', 'disabled'] });
   }
 
   // ---------------------------------------------------------------- native dark detection
@@ -575,7 +806,7 @@
         if (r.cssRules) visit(r.cssRules);
       }
     };
-    for (const sheet of document.styleSheets) {
+    for (const sheet of new Set([...document.styleSheets, ...document.adoptedStyleSheets])) {
       try { visit(sheet.cssRules); } catch { /* cross-origin */ }
     }
     return out;
@@ -588,9 +819,11 @@
     const media = rules.filter((r) => r instanceof CSSMediaRule && /prefers-color-scheme\s*:\s*dark/.test(r.conditionText || r.media.mediaText));
     if (media.length) {
       const lightRules = rules.filter((r) => r instanceof CSSMediaRule && /prefers-color-scheme\s*:\s*light/.test(r.media.mediaText));
+      const previous = [...media, ...lightRules].map((r) => [r, r.media.mediaText]);
       for (const r of media) r.media.mediaText = r.media.mediaText.replace(/\(\s*prefers-color-scheme\s*:\s*dark\s*\)/g, '(min-width: 0px)');
       for (const r of lightRules) r.media.mediaText = r.media.mediaText.replace(/\(\s*prefers-color-scheme\s*:\s*light\s*\)/g, '(max-width: 0px)');
       if (pageLooksDark()) return { kind: 'media', count: media.length };
+      for (const [r, value] of previous) r.media.mediaText = value;
     }
     const selectors = rules.map((r) => r.selectorText || '').join('\n');
     // Any class with "dark" or "night" in its name that the stylesheets use,
@@ -616,8 +849,11 @@
   function reapplyNative(n) {
     if (n.kind === 'media') return !!tryNativeDark();
     const el = n.on === 'body' ? document.body : document.documentElement;
+    const previous = el.getAttribute(n.kind);
     if (n.kind === 'class') el.classList.add(n.value); else el.setAttribute(n.kind, n.value);
-    return pageLooksDark();
+    const dark = pageLooksDark();
+    if (!dark) { if (previous === null) el.removeAttribute(n.kind); else el.setAttribute(n.kind, previous); }
+    return dark;
   }
 
   // ---------------------------------------------------------------- Jev
@@ -626,6 +862,7 @@
 
   async function jev(state, questions) {
     if (!jevAllowed()) return null;
+    if (document.hidden) await nextIdle();
     status.jev.calls++;
     const names = Object.keys(questions);
     log('jev:ask', { questions: names.length, kinds: [...new Set(names.map((n) => n.replace(/_?[ei]?\d+$/, '')))] });
@@ -707,7 +944,7 @@
   const IMAGE_CRITERIA = {
     keep: 'Photo, illustration or full-color artwork that already looks fine on a dark page.',
     dim: 'Bright colorful image (photo, screenshot or illustration with real color, meanSaturation well above 0) that should be slightly dimmed so it does not glare.',
-    backdrop: 'Product or object photo on a plain white or light-grey studio backdrop (edgeWhiteFraction near 1): the backdrop would sit as a glaring white box on a dark page, so darken the whole image into a soft tile.',
+    backdrop: 'Product or object PHOTO with real color on a white studio backdrop. Excludes nearly colorless line art with few color buckets: choose invert for those, even when edgeWhiteFraction is 1.',
     invert: 'Colorless or nearly colorless line art (meanSaturation near 0, few colorBuckets): a dark logo, icon or text image on a transparent background, or a black-on-white diagram, chart, sketch or scan. A dimmed white box would still glare, so invert its lightness.',
   };
 
@@ -743,6 +980,7 @@
       const r = results?.[i] ?? null;
       e.px = r?.svg ? await sampleSvg(r.svg) : r;
     }));
+    if (document.hidden) await nextIdle();
     for (const e of need) {
       const t = priorTreatment(e.meta, e.px);
       for (const el of e.els) if (el.isConnected) applyImage(el, t);
@@ -754,12 +992,14 @@
   // ask about elements and images Jev hasn't seen.
   async function decide({ includePage }) {
     const roleEntries = [...pendingRoles.entries()].slice(0, 36);
-    await analyzePixels([...pendingImages.values()].slice(0, 120));
-    const imageEntries = [...pendingImages.entries()].slice(0, includePage ? 24 : 28);
+    const imageEntries = [...pendingImages.entries()].slice(0, 64 - roleEntries.length - (includePage ? 3 : 0));
+    await analyzePixels(imageEntries.map(([, entry]) => entry));
     if (!includePage && !roleEntries.length && !imageEntries.length) return false;
 
     const state = {
-      task: 'A light-themed website is being converted to a dark theme by a browser extension. Judge how to treat its colors and images.',
+      task: 'Choose dark-mode treatments using the shared roleGuide and imageGuide. Only choose keep for semantically exact colors.',
+      roleGuide: roleEntries.length ? ROLE_CRITERIA : undefined,
+      imageGuide: imageEntries.length ? IMAGE_CRITERIA : undefined,
       page: includePage ? paletteSummary() : undefined,
       elements: Object.fromEntries(roleEntries.map(([, d], i) => [`e${i}`, d])),
       images: Object.fromEntries(imageEntries.map(([, e], i) => [`i${i}`, { ...e.meta, pixels: e.px }])),
@@ -791,19 +1031,21 @@
       };
     }
     roleEntries.forEach((_, i) => {
-      questions[`role_e${i}`] = { type: 'choice', instructions: `How should element e${i} in state.elements be treated in dark mode?`, criteria: ROLE_CRITERIA };
+      questions[`role_e${i}`] = { type: 'choice', instructions: `How should element e${i} in state.elements be treated in dark mode?`, criteria: { surface: 'See state.roleGuide.surface', accent: 'See state.roleGuide.accent', keep: 'See state.roleGuide.keep' } };
     });
     imageEntries.forEach((_, i) => {
-      questions[`image_i${i}`] = { type: 'choice', instructions: `How should image i${i} in state.images be treated in dark mode?`, criteria: IMAGE_CRITERIA };
+      questions[`image_i${i}`] = { type: 'choice', instructions: `How should image i${i} in state.images be treated in dark mode?`, criteria: { keep: 'Full-color artwork: see imageGuide.keep', dim: 'Bright colorful image: see imageGuide.dim', backdrop: 'Product photo with white studio backdrop; not monochrome line art', invert: 'Monochrome logo or line diagram, especially few colorBuckets and near-zero saturation' } };
     });
 
     const answers = await jev(state, questions);
     if (!answers) return false;
-    let changed = false;
+    if (document.hidden) await nextIdle();
+    let paletteChanged = false;
+    const changedSigs = new Set();
 
     if (includePage) {
-      const tone = choiceOf(answers.surface_tone)?.choice;
-      const accent = choiceOf(answers.accent_policy)?.choice;
+      const tone = choiceOf(answers.surface_tone, 0.5)?.choice;
+      const accent = choiceOf(answers.accent_policy, 0.5)?.choice;
       const depth = answers.depth?.type === 'score' ? answers.depth.score : null;
       const next = { ...theme };
       if (tone) {
@@ -815,31 +1057,37 @@
       }
       if (accent === 'keep' || accent === 'mute') next.accent = accent;
       if (depth != null) next.surfaceL = DEPTHS[Math.round(C.clamp(depth, 0, 2))];
-      changed = JSON.stringify(next) !== JSON.stringify(theme);
+      paletteChanged = JSON.stringify(next) !== JSON.stringify(theme);
       theme = next;
       profile.theme = { ...theme };
       profile.jevAt = Date.now();
     }
 
     roleEntries.forEach(([sig], i) => {
-      const c = choiceOf(answers[`role_e${i}`], 0.4);
+      const c = choiceOf(answers[`role_e${i}`], 0.5);
       pendingRoles.delete(sig);
-      if (!c) return;
-      status.jev.decisions++;
-      if (profile.roles[sig]?.role !== c.choice) changed = true;
-      profile.roles[sig] = { role: c.choice, p: c.p, at: Date.now() };
+      const prior = roleEntries[i][1].priorRole;
+      const role = c && Object.hasOwn(ROLE_CRITERIA, c.choice) ? c.choice : prior;
+      if (c) status.jev.decisions++;
+      if (role !== prior) changedSigs.add(sig);
+      profile.roles[sig] = { role, p: c?.p ?? null, source: c ? 'jev' : 'prior', at: Date.now() };
     });
     imageEntries.forEach(([key, entry], i) => {
-      const c = choiceOf(answers[`image_i${i}`], 0.4);
+      const c = choiceOf(answers[`image_i${i}`], 0.5);
       pendingImages.delete(key);
-      const treatment = c?.choice || priorTreatment(entry.meta, entry.px);
+      const treatment = c && Object.hasOwn(IMAGE_CRITERIA, c.choice) ? c.choice : priorTreatment(entry.meta, entry.px);
       if (c) status.jev.decisions++;
       profile.images[key] = { treatment, p: c?.p ?? null, source: c ? 'jev' : 'prior', at: Date.now() };
       for (const el of entry.els) if (el.isConnected) applyImage(el, treatment);
     });
     drain();
     saveProfile();
-    return changed;
+    if (paletteChanged) await rethemeAll();
+    else if (changedSigs.size) {
+      const roots = [...document.getElementsByTagName('*')].filter((el) => [...(roleSigsOf.get(el) || [])].some((sig) => changedSigs.has(sig)));
+      await rethemeAll(roots.filter((el) => !roots.some((parent) => parent !== el && parent.contains(el))));
+    }
+    return true;
   }
 
   // ---------------------------------------------------------------- verify & adapt
@@ -950,25 +1198,28 @@
     return null;
   }
 
-  let jevTimer = 0;
+  let jevTimer = 0, jevBusy = false;
   function scheduleJev() {
-    if (!enabled || (!pendingRoles.size && !pendingImages.size)) return;
+    if (!enabled || document.hidden || jevBusy || (!pendingRoles.size && !pendingImages.size)) return;
     if (Date.now() - (status.jev.failedAt || 0) < 60000) return;
     clearTimeout(jevTimer);
     jevTimer = setTimeout(async () => {
-      if (await decide({ includePage: false })) await rethemeAll();
+      if (document.hidden || jevBusy) return;
+      jevBusy = true;
+      try { await decide({ includePage: false }); } finally { jevBusy = false; scheduleJev(); }
     }, 1500);
   }
 
   async function adaptLoop() {
-    const fresh = !profile.theme || Date.now() - (profile.jevAt || 0) > 7 * 864e5;
-    if (await decide({ includePage: fresh })) await rethemeAll();
-    if (!fresh) return;
-    for (let round = 0; round < 2; round++) {
-      const adj = await verify();
-      if (!adj || !applyAdjustment(adj)) break;
-      await rethemeAll();
-    }
+    jevBusy = true;
+    try {
+      const fresh = !profile.theme || Date.now() - (profile.jevAt || 0) > 7 * 864e5;
+      await decide({ includePage: fresh });
+      if (fresh && !status.jev.lastError) {
+        const adj = await verify();
+        if (adj && applyAdjustment(adj)) await rethemeAll();
+      }
+    } finally { jevBusy = false; }
   }
 
   // ---------------------------------------------------------------- element picker
@@ -1036,6 +1287,7 @@
           enabled,
           theme,
           stats: liveStats(),
+          engine: { ...engine },
           jevAllowed: profile ? jevAllowed() : null,
           profile: profile && {
             mode: profile.mode || 'auto',
@@ -1109,6 +1361,7 @@
     log('start', { mode: 'themed', siteMode: profile.mode || 'auto', cached: { roles: Object.keys(profile.roles || {}).length, images: Object.keys(profile.images || {}).length }, theme: pickTheme(theme) });
     base.textContent = `:root{color-scheme:dark!important}::selection{background:rgba(120,150,255,.35)}`;
     (document.head || document.documentElement).append(base, pseudoSheet);
+    indexPseudos();
     observe();
     const w0 = performance.now();
     await walk(document.documentElement, 60);

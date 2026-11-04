@@ -14,7 +14,7 @@ function argmaxChoice(criteria, pick) {
   return { type: 'choice', choice, probabilities };
 }
 
-function answer(name, q, state) {
+function answer(name, q, state, mode) {
   if (q.type === 'score') {
     const levels = q.criteria.length;
     if (name === 'quality') return { type: 'score', score: levels - 1.2 };
@@ -27,6 +27,7 @@ function answer(name, q, state) {
   else if (name === 'adjust') pick = state.userFeedback ? (/read/.test(state.userFeedback) ? 'raise_contrast' : /bright/.test(state.userFeedback) ? 'darker' : 'lighter') : 'none';
   else if (name.startsWith('role_')) {
     const e = state.elements[name.slice(5)];
+    if (mode.keepRoleColor === e.color) return argmaxChoice(q.criteria, 'keep');
     pick = e.areaOfViewport > 0.12 || e.lightness > 0.85 ? 'surface' : e.widthOfViewport < 0.12 && e.heightPx < 80 && !e.textLength ? 'keep' : 'accent';
   } else if (name.startsWith('image_')) {
     const i = state.images[name.slice(6)];
@@ -49,7 +50,7 @@ export function start({ port = 8765, root, log }) {
           res.writeHead(502, { 'content-type': 'application/json' });
           return res.end('{"error":"upstream evaluation failed"}');
         }
-        const answers = Object.fromEntries(Object.entries(parsed.questions).map(([n, q]) => [n, answer(n, q, parsed.state)]));
+        const answers = Object.fromEntries(Object.entries(parsed.questions).map(([n, q]) => [n, answer(n, q, parsed.state, mode)]));
         setTimeout(() => {
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ answers, model: 'typesafe-ai/jev' }));

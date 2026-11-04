@@ -3,9 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node test/run.mjs"
+    "test": "node test/run.mjs",
+    "test:sites": "REAL_SITES=1 node test/run.mjs",
+    "test:perf": "node test/debug/perf.mjs"
   },
   "devDependencies": {
     "playwright": "^1.62.0"
-  }
+  },
+  "version": "0.3.0",
+  "description": "Adaptive dark mode for Chromium, refined by Jev."
 }
