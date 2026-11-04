@@ -187,6 +187,101 @@ for (const [f, kind] of [['native-media', 'media'], ['native-class', 'class']]) 
   check('dynamic: class change re-themed (.hot)', L(await style(page, '#item0', 'backgroundColor')) < 0.06 && (await style(page, '#item0', 'backgroundColor')) !== bgs[1], await style(page, '#item0', 'backgroundColor'));
 }
 
+// ---- optimized engine: batching, cached updates, pseudos and background tabs
+if (!real) {
+  const cdp = await ctx.newCDPSession(page);
+  let contentContext;
+  cdp.on('Runtime.executionContextCreated', ({ context }) => {
+    if (context.origin === sw.url().split('/').slice(0, 3).join('/')) contentContext = context.id;
+  });
+  await cdp.send('Runtime.enable');
+  await page.goto(url('optimized'));
+  await settle(page);
+  const diagnostic = () => sw.evaluate(async (u) => {
+    const [tab] = await chrome.tabs.query({ url: u + '*' });
+    return chrome.tabs.sendMessage(tab.id, { type: 'diagnostics' });
+  }, url('optimized'));
+  let d = await diagnostic();
+  check('batching: all 500 cards themed across chunks', await page.$$eval('.card', (els) => els.every((e) => e.hasAttribute('data-dusk'))));
+  check('pseudos: only matching elements read', d.engine.pseudoReads <= 8, `${d.engine.pseudoReads} reads for ${d.engine.snapshots} elements`);
+  for (const sel of ['#badge', '.pseudo-b', '#adopted']) {
+    const bg = await page.$eval(sel, (e) => getComputedStyle(e, '::before').backgroundColor);
+    check(`pseudos: ${sel} dark`, L(bg) < 0.08, bg);
+  }
+  const before = d.engine.snapshots;
+  await sw.evaluate(async (u) => {
+    const [tab] = await chrome.tabs.query({ url: u + '*' });
+    return chrome.tabs.sendMessage(tab.id, { type: 'feedback', kind: 'hard_to_read' });
+  }, url('optimized'));
+  d = await diagnostic();
+  check('cached palette: feedback needs no new source snapshots', d.engine.snapshots === before, `${before} → ${d.engine.snapshots}`);
+  const c = contrast(await style(page, '#card499 span', 'color'), await effectiveBg(page, '#card499 span'));
+  check('cached palette: late chunk text meets adjusted contrast', c >= d.theme.minContrast, c.toFixed(2));
+  check('transitions: initial theme does not animate from light', await page.$eval('#transition', (e) => !e.getAnimations().some((a) => ['background-color', 'color'].includes(a.transitionProperty))));
+  await page.$eval('#transition', (e) => e.classList.add('changed'));
+  await page.waitForTimeout(100);
+  check('transitions: mutation theme does not animate from light', await page.$eval('#transition', (e) => !e.getAnimations().some((a) => ['background-color', 'color'].includes(a.transitionProperty))));
+  check('mutations: transition target themed', L(await style(page, '#transition', 'backgroundColor')) < 0.08);
+  await page.$eval('#card0', (e) => { e.style.backgroundColor = '#e6ffe6'; });
+  await page.waitForTimeout(300);
+  check('mutations: page inline replacement respected and themed', L(await style(page, '#card0', 'backgroundColor')) < 0.08);
+  const prevReads = (await diagnostic()).engine.snapshots;
+  await page.$eval('#card0', (e) => e.classList.toggle('stable'));
+  await page.waitForTimeout(250);
+  d = await diagnostic();
+  check('mutations: scoped to changed subtree', d.engine.snapshots - prevReads <= 2, `${d.engine.snapshots - prevReads} reads`);
+  check('mutations: stable colors reuse mapped properties', d.engine.reused > 0, `${d.engine.reused} reused`);
+  const motionReads = d.engine.snapshots;
+  await page.$eval('#card0', (e) => { e.classList.add('moving'); e.style.transform = 'translateY(1px)'; });
+  await page.waitForTimeout(250);
+  check('mutations: motion-only classes and inline transforms skip recoloring', (await diagnostic()).engine.snapshots === motionReads);
+  await page.$eval('#badge', (e) => e.classList.add('no-pseudo'));
+  await page.waitForTimeout(250);
+  check('pseudos: removed generated content stays removed', await page.$eval('#badge', (e) => getComputedStyle(e, '::before').content === 'none'));
+  await page.evaluate(() => {
+    const sheet = document.createElement('style');
+    sheet.textContent = '#card1::after{content:"Late";background:white;color:black}';
+    document.head.append(sheet);
+  });
+  await page.waitForTimeout(500);
+  check('pseudos: late stylesheet indexed', L(await page.$eval('#card1', (e) => getComputedStyle(e, '::after').backgroundColor)) < 0.08);
+  await page.evaluate(() => {
+    const sheet = new CSSStyleSheet(); sheet.replaceSync('#late-adopted::before{content:"Late adopted";background:white;color:black}');
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+    const el = document.createElement('p'); el.id = 'late-adopted'; el.textContent = 'Late adopted'; document.body.append(el);
+  });
+  await page.waitForTimeout(500);
+  check('pseudos: late adopted stylesheet indexed', L(await page.$eval('#late-adopted', (e) => getComputedStyle(e, '::before').backgroundColor)) < 0.08);
+  await page.evaluate(() => { document.styleSheets[0].insertRule('.moving{background:#cfe5ff}', document.styleSheets[0].cssRules.length); document.querySelector('#card0').classList.remove('moving'); });
+  await page.waitForTimeout(500);
+  const cssomBefore = (await diagnostic()).engine.snapshots;
+  await page.$eval('#card0', (e) => e.classList.add('moving'));
+  await page.waitForTimeout(250);
+  check('mutations: new CSSOM color rules invalidate motion shortcut', (await diagnostic()).engine.snapshots > cssomBefore && L(await style(page, '#card0', 'backgroundColor')) < 0.08);
+  mock.keepRoleColor = '#e11d48';
+  await page.evaluate(() => {
+    const el = document.createElement('div'); el.id = 'multi-color';
+    el.style.cssText = 'position:fixed;top:400px;width:650px;height:300px;background-color:#e11d48;background-image:linear-gradient(#16a34a,#2563eb)';
+    el.textContent = 'Multiple role signatures'; document.body.append(el);
+  });
+  await page.waitForTimeout(2300);
+  check('roles: non-final gradient signature update reaches element', (await style(page, '#multi-color', 'backgroundColor')) === 'rgb(225, 29, 72)', await style(page, '#multi-color', 'backgroundColor'));
+  mock.keepRoleColor = null;
+  // Headless Chromium keeps all tabs visible. Emulate visibility in Dusk's
+  // isolated world to exercise its real event handler and scheduling.
+  await cdp.send('Runtime.evaluate', { contextId: contentContext, expression: `Object.defineProperty(document, 'hidden', { configurable: true, value: true }); dispatchEvent(new Event('visibilitychange'));` });
+  if (!Number.isInteger(contentContext)) throw new Error('Dusk execution context not found');
+  const hiddenBefore = (await diagnostic()).engine.snapshots;
+  await page.$eval('#card2', (e) => e.classList.add('hot'));
+  await page.waitForTimeout(300);
+  check('background: no theming while hidden', (await diagnostic()).engine.snapshots === hiddenBefore);
+  await cdp.send('Runtime.evaluate', { contextId: contentContext, expression: `Object.defineProperty(document, 'hidden', { configurable: true, value: false }); dispatchEvent(new Event('visibilitychange'));` });
+  await page.waitForTimeout(400);
+  check('background: catches up on visibility', (await diagnostic()).engine.snapshots > hiddenBefore && L(await style(page, '#card2', 'backgroundColor')) < 0.08);
+  check('Jev: requests stay within 64 questions', log.every((l) => Object.keys(l.body.questions).length <= 64));
+  check('Jev: one automatic quality pass per fresh site', log.filter((l) => l.body.questions.quality && !l.body.state.userFeedback).length <= 4);
+}
+
 // ---- feedback loop: user says "hard to read" -> Jev picks a correction -> persisted
 {
   await page.goto(url('blog'));
@@ -221,7 +316,7 @@ if (!real) {
 }
 
 // ---- real sites (Jev still mocked unless JEV is set)
-for (const site of ['https://news.ycombinator.com/', 'https://example.com/', 'https://en.wikipedia.org/wiki/Color_theory']) {
+for (const site of (process.env.REAL_SITES ? ['https://news.ycombinator.com/', 'https://example.com/', 'https://en.wikipedia.org/wiki/Color_theory'] : [])) {
   const name = new URL(site).hostname;
   try {
     await page.goto(site, { waitUntil: 'domcontentloaded', timeout: 20000 });
