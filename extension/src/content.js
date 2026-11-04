@@ -384,7 +384,7 @@
   // Cross-origin CSS cannot be inspected. In that case keep the exhaustive
   // fallback, so optimization never silently drops an inaccessible rule.
   let pseudoSelectors = { '::before': [], '::after': [] }, pseudoFallback = false;
-  const MOTION_ONLY = new Set(['transform', 'translate', 'rotate', 'scale', 'opacity', 'z-index', 'will-change', 'pointer-events', 'transform-origin', 'transition', 'transition-property', 'transition-duration', 'transition-timing-function', 'transition-delay']);
+  const MOTION_ONLY = new Set(['transform', 'translate', 'rotate', 'scale', 'opacity', 'z-index', 'will-change', 'pointer-events', 'transform-origin']);
   const relevantClasses = new Set();
   const motionClassRules = new Map();
   let indexedSheets = [], indexedRules = [];
@@ -401,15 +401,15 @@
     motionStyleSafe = true;
     const inaccessible = () => { pseudoFallback = true; classFallback = true; motionStyleSafe = false; };
     const visit = (rules, ancestors = '') => {
-      indexedRules.push({ rules, count: rules.length, first: rules[0], last: rules[rules.length - 1] });
+      indexedRules.push({ rules, entries: [...rules].map((rule) => ({ rule, selector: rule.selectorText })) });
       for (const rule of rules) {
         if (rule.styleSheet) { try { visit(rule.styleSheet.cssRules); } catch { inaccessible(); } }
         const selector = ancestors + ' ' + (rule.selectorText || '');
         if (rule.cssRules) {
-          if (/^@scope/i.test(rule.cssText)) classFallback = true;
+          if (/^@scope/i.test(rule.cssText)) { classFallback = true; motionStyleSafe = false; }
           visit(rule.cssRules, selector);
         }
-        if (!rule.selectorText) continue;
+        if (!rule.selectorText && !(rule.style && ancestors.trim())) continue;
         if (/\[\s*style\b/i.test(selector)) motionStyleSafe = false;
         if (/\[\s*class\b/i.test(selector) || selector.includes('\\')) classFallback = true;
         if (rule.style && [...rule.style].some((prop) => !MOTION_ONLY.has(prop))) {
@@ -420,6 +420,7 @@
             motionClassRules.get(match[1]).add(rule);
           }
         }
+        if (!rule.selectorText) continue;
         // Split only at top-level commas (e.g. :is(.a,.b)::before).
         for (const pseudo of ['::before', '::after']) {
           if (!new RegExp('::?' + pseudo.slice(2) + '\\b').test(rule.selectorText)) continue;
@@ -446,7 +447,7 @@
   function stylesheetsChanged() {
     const sheets = sourceSheets();
     if (sheets.length !== indexedSheets.length || sheets.some((sheet, i) => sheet !== indexedSheets[i])) return true;
-    return indexedRules.some(({ rules, count, first, last }) => rules.length !== count || rules[0] !== first || rules[count - 1] !== last);
+    return indexedRules.some(({ rules, entries }) => rules.length !== entries.length || entries.some(({ rule, selector }, i) => rules[i] !== rule || rule.selectorText !== selector));
   }
   function hasPseudo(el, pseudo) {
     if (pseudoFallback) return true;
@@ -979,6 +980,7 @@
       const r = results?.[i] ?? null;
       e.px = r?.svg ? await sampleSvg(r.svg) : r;
     }));
+    if (document.hidden) await nextIdle();
     for (const e of need) {
       const t = priorTreatment(e.meta, e.px);
       for (const el of e.els) if (el.isConnected) applyImage(el, t);

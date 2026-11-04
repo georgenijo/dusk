@@ -6,6 +6,8 @@ body{background:#fff;color:#222;font:16px system-ui;margin:0}
 #badge::after{content:'After';background:linear-gradient(#fff,#ddd);color:#222}
 #badge.no-pseudo::before,#badge.no-pseudo::after{content:none}
 :is(.pseudo-a,.pseudo-b)::before{content:'Grouped';background:#fff;color:#111}
+.renamed-motion{opacity:.99}
+.nested-moving{transform:translateX(1px);@media(min-width:0px){&:hover{opacity:.9}}background:white}
 .stable{background:#f4f4f4}.moving{transform:translateX(1px);opacity:.99}
 .hot{background:#ffe5ad;color:#444}
 #transition{transition:color 3s,background-color 3s;background:#eee;color:#222}

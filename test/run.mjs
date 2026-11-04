@@ -258,6 +258,35 @@ if (!real) {
   await page.$eval('#card0', (e) => e.classList.add('moving'));
   await page.waitForTimeout(250);
   check('mutations: new CSSOM color rules invalidate motion shortcut', (await diagnostic()).engine.snapshots > cssomBefore && L(await style(page, '#card0', 'backgroundColor')) < 0.08);
+  await page.evaluate(() => {
+    for (const id of ['middle-rule', 'nested-rule', 'selector-rule']) { const el = document.createElement('div'); el.id = id; el.className = 'candidate'; el.textContent = 'Rule change'; document.body.append(el); }
+    const sheet = new CSSStyleSheet(); sheet.replaceSync('.first{opacity:.8}.placeholder{opacity:.8}.last{opacity:.8}');
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+  });
+  await page.waitForTimeout(500);
+  await page.evaluate(() => {
+    const sheet = document.adoptedStyleSheets.at(-1); sheet.deleteRule(1); sheet.insertRule('.moving{background:white}', 1);
+    document.querySelector('#middle-rule').classList.add('moving');
+    document.querySelector('#nested-rule').classList.add('nested-moving');
+  });
+  await page.waitForTimeout(500);
+  check('CSSOM: middle rule replacement invalidates class shortcut', L(await style(page, '#middle-rule', 'backgroundColor')) < 0.08);
+  check('CSS nesting: trailing declarations prevent motion shortcut', L(await style(page, '#nested-rule', 'backgroundColor')) < 0.08);
+  await page.evaluate(() => { document.adoptedStyleSheets.at(-1).cssRules[1].selectorText = '.renamed-motion'; document.querySelector('#selector-rule').classList.add('renamed-motion'); });
+  await page.waitForTimeout(500);
+  check('CSSOM: selector edits invalidate class shortcut', L(await style(page, '#selector-rule', 'backgroundColor')) < 0.08);
+  await page.evaluate(() => {
+    const sheet = document.createElement('style'); sheet.textContent = '@scope ([style*="opacity"]) { #scope-child::before{content:"Scoped";background:white;color:black} }'; document.head.append(sheet);
+    const parent = document.createElement('div'); parent.id = 'scope-parent'; parent.innerHTML = '<span id="scope-child">Scope</span>'; document.body.append(parent);
+  });
+  await page.waitForTimeout(500);
+  await page.$eval('#scope-parent', (e) => { e.style.opacity = '.9'; });
+  await page.waitForTimeout(300);
+  check('CSS scope: style conditions prevent motion shortcut', L(await page.$eval('#scope-child', (e) => getComputedStyle(e, '::before').backgroundColor)) < 0.08);
+  await page.$eval('#card3', (e) => { e.style.transitionProperty = 'background-color'; e.style.transitionDuration = '10s'; });
+  await page.waitForTimeout(300);
+  await sw.evaluate(async (u) => { const [tab] = await chrome.tabs.query({ url: u + '*' }); return chrome.tabs.sendMessage(tab.id, { type: 'feedback', kind: 'too_dark' }); }, url('optimized'));
+  check('transitions: runtime declaration changes refresh cached suppression', await page.$eval('#card3', (e) => !e.getAnimations().some((a) => a.transitionProperty === 'background-color')));
   mock.keepRoleColor = '#e11d48';
   await page.evaluate(() => {
     const el = document.createElement('div'); el.id = 'multi-color';
