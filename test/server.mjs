@@ -54,7 +54,7 @@ export function start({ port = 8765, root, log }) {
         setTimeout(() => {
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ answers, model: 'typesafe-ai/jev' }));
-        }, 120);
+        }, mode.delay ?? 120);
       });
       return;
     }

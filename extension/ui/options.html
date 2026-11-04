@@ -1,37 +1,62 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<title>Dusk · Jev settings</title>
-<link rel="stylesheet" href="ui.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dusk · Jev settings</title>
+  <link rel="stylesheet" href="ui.css">
 </head>
 <body class="options">
-  <h1>Jev</h1>
-  <p class="muted">Dusk sends Jev page structure only: colors, sizes, class names and image pixel statistics. Never text, URLs or pixels. Banking, mail, health, login and password pages are never sent.</p>
-
-  <label class="check"><input type="checkbox" id="jevEnabled"> Use Jev to decide and adapt themes</label>
-
-  <div class="label">Route</div>
-  <div class="seg" id="provider">
-    <button data-p="cpa">CPA gateway</button>
-    <button data-p="vercel">Vercel AI Gateway</button>
-  </div>
-
-  <div id="cpa">
-    <label>CPA base URL <input id="baseUrl" spellcheck="false"></label>
-    <label>CPA client key <input id="apiKey" type="password" spellcheck="false" autocomplete="off"></label>
-  </div>
-  <div id="vercel">
-    <label>Vercel AI Gateway key <input id="vercelKey" type="password" spellcheck="false" autocomplete="off" placeholder="vck_…"></label>
-  </div>
-
-  <label class="check"><input type="checkbox" id="debug"> Debug logging (writes Dusk's decisions to the page console)</label>
-
-  <div class="actions">
-    <button id="save" class="primary">Save</button>
-    <button id="test">Test Jev</button>
-    <span id="out" class="small"></span>
-  </div>
-  <script src="options.js"></script>
+  <main>
+    <header class="settings-header">
+      <div class="brand"><span class="dusk-mark" aria-hidden="true"></span><span>Dusk</span></div>
+      <h1>Jev settings</h1>
+      <p class="muted">Connect Jev to refine Dusk’s themes. Your site controls stay in the popup.</p>
+    </header>
+    <form id="settings-form" novalidate>
+      <section class="card settings-card" aria-labelledby="connection-title">
+        <div class="row"><h2 id="connection-title">Connection</h2><span id="connection" class="badge" role="status">Checking…</span></div>
+        <p id="connection-help" class="help">Loading saved settings.</p>
+        <label class="check"><input type="checkbox" id="jevEnabled"><span>Use Jev to refine themes<span class="help">Enabling Jev does not establish a connection.</span></span></label>
+        <div class="field">
+          <label for="provider">Provider</label>
+          <select id="provider" aria-describedby="provider-help">
+            <option value="vercel">Vercel AI Gateway</option>
+            <option value="cpa">CPA gateway</option>
+          </select>
+          <p id="provider-help" class="help"></p>
+        </div>
+        <div id="vercel" class="provider-fields">
+          <label for="vercelKey">Vercel AI Gateway key</label>
+          <input id="vercelKey" type="password" spellcheck="false" autocomplete="off" aria-describedby="key-help" placeholder="Enter your Vercel key">
+        </div>
+        <div id="cpa" class="provider-fields" hidden>
+          <label for="baseUrl">CPA base URL</label>
+          <input id="baseUrl" type="url" spellcheck="false" autocomplete="off" placeholder="https://your-gateway.example/v1">
+          <label for="apiKey">CPA client key</label>
+          <input id="apiKey" type="password" spellcheck="false" autocomplete="off" aria-describedby="key-help" placeholder="Enter your CPA client key">
+        </div>
+        <p id="key-help" class="help">Keys are stored locally in this browser. Saving does not test them.</p>
+        <div class="actions">
+          <button type="submit" id="save" class="primary">Save settings</button>
+          <button type="button" id="test">Test connection</button>
+        </div>
+        <p id="out" class="notice" role="status" hidden></p>
+      </section>
+      <details class="card privacy">
+        <summary>Connection &amp; privacy</summary>
+        <div class="disclosure-body">
+          <p>Jev receives structural signals such as colors, sizes, class names and image statistics, rather than page text or image pixels. Requests use the provider you select.</p>
+          <p>Dusk skips automatic Jev requests on private pages and pages using native dark mode, pages that are already dark, and sites you turn off.</p>
+          <p>Save settings first, then test the saved connection. A test sends a small synthetic image description, not the current page. Request attempts are not a measure of billed tokens.</p>
+        </div>
+      </details>
+      <section class="card settings-card" aria-labelledby="debug-title">
+        <h2 id="debug-title">Troubleshooting</h2>
+        <label class="check"><input type="checkbox" id="debug"><span>Debug logging<span class="help">Write Dusk’s decisions to the page console.</span></span></label>
+      </section>
+    </form>
+  </main>
+  <script src="options.js" type="module"></script>
 </body>
 </html>

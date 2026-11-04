@@ -30,6 +30,8 @@
 
   let profile = null;
   let enabled = false;
+  let themeEpoch = 0, nativeInitializing = false, nativeTimer = 0, nativeObserver = null;
+  let nativeMutationAt = performance.now(), nativeLastCheck = 0, nativeForceCheck = false;
   let theme = { ...DEFAULT_THEME };
   const engine = { snapshots: 0, pseudoReads: 0, renders: 0, reused: 0, writes: 0 };
   const originals = new WeakMap(); // immutable computed-style snapshots
@@ -670,7 +672,9 @@
     }
     const ordered = [...elements.filter((el) => visible.has(el)), ...elements.filter((el) => !visible.has(el))];
     for (let i = 0; i < ordered.length; i += 180) {
+      if (!enabled) return;
       if (document.hidden) await nextIdle();
+      if (!enabled) return;
       const batch = ordered.slice(i, i + 180).filter(eligible);
       const rows = cached ? batch.map((el) => [el, originals.get(el)]).filter(([, row]) => row) : readBatch(batch);
       const transitions = cached ? suppressCachedTransitions(rows) : rows.transitions;
@@ -729,7 +733,7 @@
     const roots = [...dirty].filter((el) => el.isConnected && ![...dirty].some((o) => o !== el && o.contains(el)));
     dirty.clear();
     const t0 = performance.now();
-    try { await serialize(() => walkNow(roots)); } finally { flushing = false; }
+    try { await serialize(async () => { if (!await yieldToNative()) await walkNow(roots); }); } finally { flushing = false; }
     if (roots.length) logMutations(roots.length, performance.now() - t0);
     scheduleJev();
     if (dirty.size) queue([...dirty][0]);
@@ -787,15 +791,195 @@
   }
 
   // ---------------------------------------------------------------- native dark detection
-  function pageLooksDark() {
+  function nativeDarkHint() {
+    for (const el of [document.documentElement, document.body].filter(Boolean)) {
+      if (el.hasAttribute('dark') && !/^(false|0|light)$/i.test(el.getAttribute('dark'))) return true;
+      for (const attr of ['data-theme', 'data-bs-theme', 'data-color-mode', 'data-mode', 'data-color-scheme']) {
+        if (/^(dark|night)$/i.test(el.getAttribute(attr) || '')) return true;
+      }
+      if ([...el.classList].some((name) => /^(dark|night|dark-mode|theme-dark|night-mode|skin-theme-clientpref-night)$/i.test(name))) return true;
+    }
+    return false;
+  }
+
+  function pageLooksDark(source = false) {
+    const previous = preflight.disabled;
     preflight.disabled = true;
-    const read = (el) => el && C.parse(getComputedStyle(el).backgroundColor);
-    let bg = read(document.body);
-    if (!bg || bg.a < 0.5) bg = read(document.documentElement);
-    const fg = document.body && C.parse(getComputedStyle(document.body).color);
-    preflight.disabled = false;
-    if (!bg || bg.a < 0.5) return false;
-    return lchOf(bg).L < 0.35 && (!fg || lchOf(fg).L > 0.6);
+    try {
+      const colors = new Map();
+      const read = (el) => {
+        if (colors.has(el)) return colors.get(el);
+        const cs = getComputedStyle(el);
+        if (!source) {
+          const result = { bg: C.parse(cs.backgroundColor), fg: C.parse(cs.color) };
+          colors.set(el, result);
+          return result;
+        }
+        const original = originals.get(el)?.cs;
+        const properties = saved.get(el);
+        const overridden = (prop) => properties?.[prop] && el.style.getPropertyValue(prop) === properties[prop].ours && el.style.getPropertyPriority(prop) === 'important';
+        const result = {
+          bg: C.parse(original && overridden('background-color') ? original.backgroundColor : cs.backgroundColor),
+          fg: C.parse(original && overridden('color') ? original.color : cs.color),
+        };
+        colors.set(el, result);
+        return result;
+      };
+      // A transparent root propagates the body's background to the viewport,
+      // including points below a short body (where hit-testing returns html).
+      const root = read(document.documentElement), body = document.body && read(document.body);
+      const canvas = root.bg?.a >= 0.99 ? root.bg : body?.bg?.a > 0.01 ? body.bg : root.bg;
+      let total = 0, dark = 0, lightText = 0;
+      // Look at the visible app, not just a transparent body or loading shell.
+      for (const y of [0.2, 0.5, 0.8]) for (const x of [0.15, 0.4, 0.65, 0.85]) {
+        const el = document.elementFromPoint(x * innerWidth, y * innerHeight);
+        if (!el || MEDIA.has(el.tagName) || el.closest('video,canvas,iframe')) continue;
+        const foreground = el === document.documentElement && body ? body.fg : read(el).fg;
+        const layers = [];
+        for (let parent = el, depth = 0; parent && depth < 30; parent = parent.parentElement, depth++) {
+          const bg = read(parent).bg;
+          if (bg && bg.a > 0.01) { layers.push(bg); if (bg.a >= 0.99) break; }
+        }
+        let bg = C.over(canvas || { r: 1, g: 1, b: 1, a: 1 }, { r: 1, g: 1, b: 1, a: 1 });
+        for (let i = layers.length - 1; i >= 0; i--) bg = C.over(layers[i], bg);
+        total++;
+        if (lchOf(bg).L < 0.4) dark++;
+        if (foreground && lchOf(foreground).L > 0.6) lightText++;
+      }
+      // A dark marker is supporting evidence, never sufficient by itself.
+      return total >= 4 && dark / total >= 0.75 && (lightText / total >= 0.25 || nativeDarkHint());
+    } finally { preflight.disabled = previous; }
+  }
+
+  function withoutDusk(read) {
+    const restored = [];
+    const motion = document.createElement('style');
+    motion.id = 'dusk-native-probe';
+    motion.textContent = '*,*::before,*::after{transition:none!important}';
+    document.documentElement.append(motion);
+    getComputedStyle(document.documentElement).color;
+    const sheets = [preflight, base, pseudoSheet].map((sheet) => [sheet, sheet.disabled]);
+    try {
+      for (const [sheet] of sheets) sheet.disabled = true;
+      for (const el of document.querySelectorAll(`[${ATTR}]`)) {
+        const properties = saved.get(el);
+        for (const [prop, entry] of Object.entries(properties || {})) {
+          if (el.style.getPropertyValue(prop) !== entry.ours || el.style.getPropertyPriority(prop) !== 'important') continue;
+          restored.push([el, prop, entry.ours]);
+          if (entry.orig[0]) el.style.setProperty(prop, ...entry.orig); else el.style.removeProperty(prop);
+        }
+      }
+      return read();
+    } finally {
+      for (const [el, prop, value] of restored) { el.style.setProperty(prop, value, 'important'); markOwn(el); }
+      for (const [sheet, disabled] of sheets) sheet.disabled = disabled;
+      getComputedStyle(document.documentElement).color;
+      motion.remove();
+    }
+  }
+
+  function clearThemeState() {
+    pendingRoles.clear(); pendingImages.clear(); dirty.clear();
+    for (const el of document.getElementsByTagName('*')) {
+      tally.delete(el); effBg.delete(el); roleOf.delete(el); roleSigsOf.delete(el); painted.delete(el); originals.delete(el);
+    }
+  }
+
+  async function yieldToNative(force = false) {
+    if (profile.mode === 'on' || profile.mode === 'off' || !enabled) return false;
+    if (!force && performance.now() - nativeLastCheck < 500) return false;
+    nativeLastCheck = performance.now();
+    // Ordinary color/motion mutations stay on the cheap cached-source path.
+    if (!force && !pageLooksDark(true)) return false;
+    if (!withoutDusk(() => pageLooksDark())) return false;
+    enabled = false; themeEpoch++;
+    clearTimeout(jevTimer);
+    observer?.disconnect();
+    unthemeAll();
+    clearThemeState();
+    status.mode = 'already-dark'; status.native = null;
+    log('native:handoff', { reason: 'site-became-dark', jevCalls: status.jev.calls });
+    return true;
+  }
+
+  function scheduleNativeCheck(force = false) {
+    nativeMutationAt = performance.now();
+    nativeForceCheck ||= force;
+    if (nativeInitializing || nativeTimer || document.hidden || !profile || profile.mode === 'on' || profile.mode === 'off') return;
+    nativeTimer = setTimeout(() => {
+      nativeTimer = 0;
+      if (document.hidden) return;
+      const forced = nativeForceCheck; nativeForceCheck = false;
+      let activated = false;
+      serialize(async () => {
+        if (enabled) await yieldToNative(forced);
+        else {
+          nativeLastCheck = performance.now();
+          if (!withoutDusk(() => pageLooksDark())) { await activateTheme(); activated = enabled; }
+        }
+      }).then(() => { if (activated) return runAdaptation(); }).catch((err) => log('native:error', { error: String(err.message || err) }));
+    }, Math.max(150, 500 - (performance.now() - nativeLastCheck)));
+  }
+
+  function observeNative() {
+    nativeObserver = new MutationObserver((records) => {
+      let relevant = false, force = false;
+      for (const record of records) {
+        const el = record.target;
+        if (el.id?.startsWith('dusk-')) continue;
+        if (record.type === 'attributes') {
+          if (record.attributeName === 'style' && el.getAttribute('style') === ownStyle.get(el)) continue;
+          const root = el === document.documentElement || el === document.body;
+          if (root || !['class', 'style'].includes(record.attributeName)) { relevant = true; force = true; }
+          else if (el.matches('main,[role=main],#app,#root,ytd-app')) { relevant = true; force = true; }
+          // Native sites have no paint observer. Their theme-bearing wrapper
+          // can be any element, so coalesce its class/style changes too.
+          else if (!enabled) relevant = true;
+        } else {
+          const nodes = [...record.addedNodes, ...record.removedNodes];
+          if (nodes.length && nodes.every((node) => node.nodeType === 1 && node.id?.startsWith('dusk-'))) continue;
+          relevant = true;
+          if (el.closest?.('style') || nodes.some((node) => node.nodeType === 1 && node.matches?.('style,link[rel=stylesheet]'))) force = true;
+        }
+      }
+      if (relevant) scheduleNativeCheck(force);
+    });
+    nativeObserver.observe(document.documentElement, { subtree: true, childList: true, attributes: true,
+      attributeFilter: ['class', 'style', 'dark', 'data-theme', 'data-bs-theme', 'data-color-mode', 'data-mode', 'data-color-scheme', 'href', 'media', 'disabled'] });
+    document.addEventListener('load', (event) => {
+      if (event.target.matches?.('link[rel=stylesheet]')) scheduleNativeCheck(true);
+    }, true);
+    addEventListener('visibilitychange', () => { if (!document.hidden) scheduleNativeCheck(true); });
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => scheduleNativeCheck(true));
+  }
+
+  async function initialNativeCheck() {
+    nativeInitializing = true;
+    status.mode = 'checking';
+    const started = performance.now();
+    const deferredHost = /(^|\.)(google\.com|youtube\.com|youtu\.be)$/.test(host);
+    const appShell = !!document.querySelector('#app,#root,ytd-app');
+    const maxWait = deferredHost ? 8000 : appShell ? 3500 : 1500;
+    let triedNative = false;
+    try {
+      while (true) {
+        if (document.hidden) await nextIdle();
+        if (withoutDusk(() => pageLooksDark())) return { mode: 'already-dark' };
+        if (!triedNative) {
+          triedNative = true;
+          if (profile.native && withoutDusk(() => reapplyNative(profile.native))) return { mode: 'native', native: profile.native };
+          const native = withoutDusk(() => tryNativeDark());
+          if (native) return { mode: 'native', native };
+        }
+        const elapsed = performance.now() - started;
+        const populated = (!deferredHost && !appShell) || document.body?.querySelectorAll('*').length >= 80;
+        if (elapsed >= maxWait || (populated && elapsed >= (deferredHost ? 2000 : appShell ? 1000 : 350) && performance.now() - nativeMutationAt >= 250)) break;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      }
+      // Late stylesheets can expose a native switch that wasn't present at DOMContentLoaded.
+      const native = withoutDusk(() => tryNativeDark());
+      return native ? { mode: 'native', native } : null;
+    } finally { nativeInitializing = false; nativeForceCheck = false; }
   }
 
   function readableRules() {
@@ -831,7 +1015,7 @@
     const counts = new Map();
     for (const m of selectors.matchAll(/\.([\w-]*(?:dark|night)[\w-]*)/gi)) counts.set(m[1], (counts.get(m[1]) || 0) + 1);
     const classes = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([c]) => ['class', c]);
-    const attrs = [['data-theme', 'dark'], ['data-bs-theme', 'dark'], ['data-color-mode', 'dark'], ['data-mode', 'dark'], ['data-color-scheme', 'dark']]
+    const attrs = [['dark', ''], ['data-theme', 'dark'], ['data-bs-theme', 'dark'], ['data-color-mode', 'dark'], ['data-mode', 'dark'], ['data-color-scheme', 'dark']]
       .filter(([a]) => selectors.includes(`[${a}`));
     const candidates = [...classes, ...attrs];
     for (const [attr, value] of candidates) {
@@ -861,12 +1045,23 @@
     !PRIVATE_HOST.test(host) && !document.querySelector('input[type=password]') && profile.jev !== false;
 
   async function jev(state, questions) {
-    if (!jevAllowed()) return null;
+    if (!enabled || !jevAllowed()) return null;
     if (document.hidden) await nextIdle();
+    await serialize(() => yieldToNative(nativeForceCheck));
+    if (!enabled || !jevAllowed()) return null;
+    const epoch = themeEpoch;
+    const connection = await chrome.runtime.sendMessage({ type: 'connectionStatus' }).catch(() => null);
+    if (!connection?.jevEnabled || !connection.hasKey) {
+      status.jev.lastError = connection?.jevEnabled === false ? 'disabled' : 'no API key (open Dusk options)';
+      status.jev.failedAt = Date.now();
+      return null;
+    }
+    if (!enabled || themeEpoch !== epoch || !jevAllowed()) return null;
     status.jev.calls++;
     const names = Object.keys(questions);
     log('jev:ask', { questions: names.length, kinds: [...new Set(names.map((n) => n.replace(/_?[ei]?\d+$/, '')))] });
     const res = await chrome.runtime.sendMessage({ type: 'jev', state, questions }).catch((e) => ({ ok: false, error: String(e.message || e) }));
+    if (!enabled || themeEpoch !== epoch) return null;
     if (!res?.ok) {
       status.jev.lastError = res?.error || 'no response';
       status.jev.failedAt = Date.now();
@@ -973,6 +1168,7 @@
   }
 
   async function analyzePixels(entries) {
+    const epoch = themeEpoch;
     const need = entries.filter((e) => e.px === undefined);
     if (!need.length) return;
     const results = await chrome.runtime.sendMessage({ type: 'analyzeImages', urls: need.map((e) => e.url) }).catch(() => null);
@@ -981,6 +1177,7 @@
       e.px = r?.svg ? await sampleSvg(r.svg) : r;
     }));
     if (document.hidden) await nextIdle();
+    if (!enabled || themeEpoch !== epoch) return;
     for (const e of need) {
       const t = priorTreatment(e.meta, e.px);
       for (const el of e.els) if (el.isConnected) applyImage(el, t);
@@ -991,9 +1188,11 @@
   // First visit: palette, roles and images in one request. Later visits only
   // ask about elements and images Jev hasn't seen.
   async function decide({ includePage }) {
+    const epoch = themeEpoch;
     const roleEntries = [...pendingRoles.entries()].slice(0, 36);
     const imageEntries = [...pendingImages.entries()].slice(0, 64 - roleEntries.length - (includePage ? 3 : 0));
     await analyzePixels(imageEntries.map(([, entry]) => entry));
+    if (!enabled || themeEpoch !== epoch) return false;
     if (!includePage && !roleEntries.length && !imageEntries.length) return false;
 
     const state = {
@@ -1040,6 +1239,7 @@
     const answers = await jev(state, questions);
     if (!answers) return false;
     if (document.hidden) await nextIdle();
+    if (!enabled || themeEpoch !== epoch) return false;
     let paletteChanged = false;
     const changedSigs = new Set();
 
@@ -1142,6 +1342,7 @@
   const pickTheme = (t) => ({ surfaceL: +t.surfaceL.toFixed(3), accent: t.accent, minContrast: t.minContrast, imageDim: +t.imageDim.toFixed(2) });
 
   async function verify(feedback = null) {
+    const epoch = themeEpoch;
     const stats = liveStats();
     const state = {
       task: 'A browser extension converted a light website to dark mode. Judge the result from these measurements and pick one correction.',
@@ -1170,7 +1371,7 @@
         criteria: feedback ? Object.fromEntries(Object.entries(ADJUSTMENTS).filter(([k]) => k !== 'none')) : ADJUSTMENTS,
       },
     });
-    if (!answers) return null;
+    if (!answers || !enabled || themeEpoch !== epoch) return null;
     status.quality = answers.quality?.score ?? null;
     const adj = choiceOf(answers.adjust, feedback ? 0 : 0.5)?.choice;
     log('verify', { feedback, quality: status.quality, adjust: adj ?? null, measured: state.result });
@@ -1187,8 +1388,11 @@
   };
 
   async function onFeedback(kind) {
+    if (!enabled) return null;
+    const epoch = themeEpoch;
     profile.history = [...(profile.history || []).slice(-19), { at: Date.now(), feedback: kind }];
     const fromJev = await verify(FEEDBACK_TEXT[kind]);
+    if (!enabled || themeEpoch !== epoch) return null;
     const adj = fromJev || FEEDBACK_FALLBACK[kind];
     log('feedback', { kind, adjustment: adj, source: fromJev ? 'jev' : 'fallback' });
     if (applyAdjustment(adj)) {
@@ -1200,7 +1404,7 @@
 
   let jevTimer = 0, jevBusy = false;
   function scheduleJev() {
-    if (!enabled || document.hidden || jevBusy || (!pendingRoles.size && !pendingImages.size)) return;
+    if (!enabled || !jevAllowed() || document.hidden || nativeInitializing || jevBusy || (!pendingRoles.size && !pendingImages.size)) return;
     if (Date.now() - (status.jev.failedAt || 0) < 60000) return;
     clearTimeout(jevTimer);
     jevTimer = setTimeout(async () => {
@@ -1211,15 +1415,20 @@
   }
 
   async function adaptLoop() {
+    if (!enabled || !jevAllowed()) return;
     jevBusy = true;
+    const epoch = themeEpoch;
     try {
       const fresh = !profile.theme || Date.now() - (profile.jevAt || 0) > 7 * 864e5;
-      await decide({ includePage: fresh });
-      if (fresh && !status.jev.lastError) {
+      const decided = await decide({ includePage: fresh });
+      if (decided && enabled && themeEpoch === epoch && fresh && !status.jev.lastError) {
         const adj = await verify();
         if (adj && applyAdjustment(adj)) await rethemeAll();
       }
-    } finally { jevBusy = false; }
+    } finally {
+      jevBusy = false;
+      if (enabled && themeEpoch !== epoch) runAdaptation().catch((err) => log('jev:error', { error: String(err.message || err) }));
+    }
   }
 
   // ---------------------------------------------------------------- element picker
@@ -1310,13 +1519,14 @@
         return true;
       }
       if (msg.type === 'feedback') return { adjustment: await onFeedback(msg.kind) };
-      if (msg.type === 'pick') return pick();
+      if (msg.type === 'pick') return enabled ? pick() : null;
       if (msg.type === 'reset') {
         await chrome.storage.local.remove(KEY);
         location.reload();
         return true;
       }
       if (msg.type === 'reverify') {
+        if (!enabled) return { adjustment: null, quality: status.quality };
         const adj = await verify();
         if (adj && applyAdjustment(adj)) await rethemeAll();
         return { adjustment: adj, quality: status.quality };
@@ -1326,51 +1536,56 @@
     return true;
   });
 
-  async function start() {
-    profile = await loadProfile();
-    if (profile.mode === 'off') {
-      status.mode = 'off';
-      return unthemeAll();
-    }
-    if (profile.theme) theme = { ...DEFAULT_THEME, ...profile.theme };
-    if (document.readyState === 'loading') await new Promise((r) => addEventListener('DOMContentLoaded', r, { once: true }));
+  async function runAdaptation() {
+    if (!enabled || jevBusy || nativeInitializing) return;
+    await adaptLoop();
+    if (!enabled) return;
+    scheduleJev();
+    document.documentElement.setAttribute('data-dusk-adapted', String(status.jev.lastError === null && status.jev.calls > 0));
+  }
 
-    if (profile.mode !== 'on') {
-      if (profile.native && reapplyNative(profile.native)) {
-        status.mode = 'native';
-        status.native = profile.native;
-        return preflight.remove();
-      }
-      if (pageLooksDark()) {
-        status.mode = 'already-dark';
-        return preflight.remove();
-      }
-      const native = tryNativeDark();
-      if (native) {
-        log('native', native);
-        profile.native = native;
-        saveProfile();
-        status.mode = 'native';
-        status.native = native;
-        return preflight.remove();
-      }
-    }
-
-    enabled = true;
-    status.mode = 'themed';
+  async function activateTheme() {
+    if (enabled || profile.mode === 'off') return;
+    enabled = true; themeEpoch++;
+    status.mode = 'themed'; status.native = null;
     log('start', { mode: 'themed', siteMode: profile.mode || 'auto', cached: { roles: Object.keys(profile.roles || {}).length, images: Object.keys(profile.images || {}).length }, theme: pickTheme(theme) });
     base.textContent = `:root{color-scheme:dark!important}::selection{background:rgba(120,150,255,.35)}`;
     (document.head || document.documentElement).append(base, pseudoSheet);
     indexPseudos();
     observe();
     const w0 = performance.now();
-    await walk(document.documentElement, 60);
+    await walkNow(document.documentElement);
+    if (!enabled) return;
     log('walk', { ms: Math.round(performance.now() - w0), ...liveStats() });
     preflight.remove();
     document.documentElement.setAttribute('data-dusk-ready', '');
-    await adaptLoop();
-    scheduleJev();
-    document.documentElement.setAttribute('data-dusk-adapted', String(status.jev.lastError === null && status.jev.calls > 0));
+  }
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes.settings || !enabled) return;
+    status.jev.lastError = null; status.jev.failedAt = 0;
+    runAdaptation().catch((err) => log('jev:error', { error: String(err.message || err) }));
+  });
+
+  async function start() {
+    profile = await loadProfile();
+    if (profile.mode === 'off') { status.mode = 'off'; return unthemeAll(); }
+    if (profile.theme) theme = { ...DEFAULT_THEME, ...profile.theme };
+    if (document.readyState === 'loading') await new Promise((r) => addEventListener('DOMContentLoaded', r, { once: true }));
+    if (profile.mode !== 'on') {
+      observeNative();
+      const found = await initialNativeCheck();
+      if (found) {
+        status.mode = found.mode; status.native = found.native || null;
+        if (found.native) { profile.native = found.native; saveProfile(); }
+        log('native', { mode: found.mode, ...(found.native || {}) });
+        document.documentElement.setAttribute('data-dusk-ready', '');
+        document.documentElement.setAttribute('data-dusk-adapted', 'false');
+        return preflight.remove();
+      }
+    }
+    await serialize(activateTheme);
+    await runAdaptation();
   }
 
   start().catch((err) => {
